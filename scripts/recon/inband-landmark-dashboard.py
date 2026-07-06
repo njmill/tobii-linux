@@ -383,6 +383,10 @@ class MediaPipeWorkerClient:
             self.args.mediapipe_preprocess,
             "--upscale",
             str(self.args.mediapipe_upscale),
+            "--rotation-mode",
+            self.args.mediapipe_rotation_mode,
+            "--pose-source",
+            self.args.mediapipe_pose_source,
             "--min-detection-confidence",
             str(self.args.mediapipe_min_detection_confidence),
             "--min-presence-confidence",
@@ -498,6 +502,7 @@ class Dashboard:
         self.last_landmark_time = 0.0
         self.landmarks: list[tuple[int, float, float, float]] = []
         self.pose_text = "landmarks waiting"
+        self.pose_detail_text = ""
         self.roi_text = args.roi
         self.roi_tuple = parse_roi(args.roi)
         self.roi_mode = "fixed"
@@ -816,6 +821,28 @@ class Dashboard:
         )
         self.pose_raw = raw
         self.pose_raw_history.append(raw)
+        matrix_raw = (
+            result.get("matrix_yaw"),
+            result.get("matrix_pitch"),
+            result.get("matrix_roll"),
+        )
+        landmark_raw = (
+            result.get("landmark_yaw"),
+            result.get("landmark_pitch"),
+            result.get("landmark_roll"),
+        )
+        if all(value is not None for value in matrix_raw) and all(value is not None for value in landmark_raw):
+            self.pose_detail_text = (
+                f"selected {raw[0]:+.1f}/{raw[1]:+.1f}/{raw[2]:+.1f} "
+                f"matrix {float(matrix_raw[0]):+.1f}/{float(matrix_raw[1]):+.1f}/{float(matrix_raw[2]):+.1f} "
+                f"landmark {float(landmark_raw[0]):+.1f}/{float(landmark_raw[1]):+.1f}/{float(landmark_raw[2]):+.1f}"
+            )
+        elif all(value is not None for value in matrix_raw):
+            self.pose_detail_text = f"matrix {float(matrix_raw[0]):+.1f}/{float(matrix_raw[1]):+.1f}/{float(matrix_raw[2]):+.1f}"
+        elif all(value is not None for value in landmark_raw):
+            self.pose_detail_text = f"landmark {float(landmark_raw[0]):+.1f}/{float(landmark_raw[1]):+.1f}/{float(landmark_raw[2]):+.1f}"
+        else:
+            self.pose_detail_text = ""
         if self.pose_at_hold_start is not None:
             self.yaw_filter.reset()
             self.pitch_filter.reset()
@@ -1117,6 +1144,8 @@ class Dashboard:
                 f"track eye   {tracked_text}\n\n"
                 f"landmarks   {len(self.landmarks)} pts\n"
                 f"pose        {self.pose_text}\n"
+                f"{'pose src    ' + self.args.mediapipe_pose_source + chr(10) if self.args.engine == 'mediapipe' else ''}"
+                f"{'pose detail ' + self.pose_detail_text + chr(10) if self.pose_detail_text else ''}"
                 f"pose raw    {self.pose_raw[0]:+.1f}/{self.pose_raw[1]:+.1f}/{self.pose_raw[2]:+.1f}\n"
                 f"jitter raw  {jitter_text}\n"
                 f"preprocess  {self.args.preprocess}\n\n"
@@ -1218,6 +1247,8 @@ def main() -> int:
     parser.add_argument("--mediapipe-model", type=Path, default=ROOT / "assets" / "mediapipe" / "face_landmarker.task")
     parser.add_argument("--mediapipe-preprocess", choices=("raw", "stretch", "clahe"), default="clahe")
     parser.add_argument("--mediapipe-upscale", type=float, default=1.0)
+    parser.add_argument("--mediapipe-rotation-mode", choices=("forward", "euler"), default="forward")
+    parser.add_argument("--mediapipe-pose-source", choices=("matrix", "landmark-normal", "hybrid"), default="hybrid")
     parser.add_argument("--mediapipe-min-detection-confidence", type=float, default=0.35)
     parser.add_argument("--mediapipe-min-presence-confidence", type=float, default=0.35)
     parser.add_argument("--mediapipe-min-tracking-confidence", type=float, default=0.35)

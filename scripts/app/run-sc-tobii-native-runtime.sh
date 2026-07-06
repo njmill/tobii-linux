@@ -126,7 +126,6 @@ if [[ "${SC_POC_KEEP_EXISTING_CAPTURE:-0}" != "1" ]]; then
   pkill -f "$root_dir/scripts/recon/eye-pose-dashboard.py" 2>/dev/null || true
   pkill -f "$root_dir/build/tobii-ttp-mux" 2>/dev/null || true
   pkill -f "$root_dir/build/tobii-gaze-native" 2>/dev/null || true
-  pkill -f "$root_dir/references/external/OpenSeeFace/facetracker.py" 2>/dev/null || true
   pkill -f "tobii-middleware-pipe-spy.exe" 2>/dev/null || true
   pkill -f "tobii-middleware-spy.py.*--port $middleware_port" 2>/dev/null || true
   sleep 0.3
@@ -326,7 +325,7 @@ echo "head_calibration_file=$head_calibration_file"
 echo
 
 common_args=(
-  --face-engine mediapipe --no-hq-frames --osf-fps "${SC_TOBII_FACE_FPS:-60}"
+  --no-hq-frames --face-frame-hz "${SC_TOBII_FACE_FPS:-60}"
   --harness "${SC_TOBII_HARNESS:-tobii}"
   --tobii-udp "127.0.0.1:$tobii_udp_port"
   --trackir-udp "127.0.0.1:$trackir_udp_port"
@@ -335,6 +334,7 @@ common_args=(
   --opentrack-yaw-scale "${SC_TOBII_YAW_SCALE:-8.0}"
   --opentrack-pitch-scale "${SC_TOBII_PITCH_SCALE:--14.0}"
   --opentrack-roll-scale "${SC_TOBII_ROLL_SCALE:-1.0}"
+  --tobii-roll-source "${SC_TOBII_ROLL_SOURCE:-pose}"
   --opentrack-x-scale "${SC_TOBII_X_SCALE:-1.0}"
   --opentrack-y-scale "${SC_TOBII_Y_SCALE:-1.0}"
   --opentrack-z-scale "${SC_TOBII_Z_SCALE:-1.0}"
@@ -353,7 +353,9 @@ common_args=(
   --mediapipe-yaw-output-scale "${SC_TOBII_MEDIAPIPE_YAW_SCALE:-0.15}"
   --mediapipe-pitch-output-scale "${SC_TOBII_MEDIAPIPE_PITCH_SCALE:-0.10}"
   --mediapipe-roll-output-scale "${SC_TOBII_MEDIAPIPE_ROLL_SCALE:-0.15}"
-  --osf-pitch-max-delta "${SC_TOBII_OSF_PITCH_MAX_DELTA:-12.0}"
+  --mediapipe-pitch-yaw-comp "${SC_TOBII_MEDIAPIPE_PITCH_YAW_COMP:-1.0}"
+  --mediapipe-rotation-mode "${SC_TOBII_MEDIAPIPE_ROTATION_MODE:-forward}"
+  --mediapipe-pose-source "${SC_TOBII_MEDIAPIPE_POSE_SOURCE:-hybrid}"
   --blink-hold-s "${SC_TOBII_BLINK_HOLD_S:-0.20}"
   --tuning-file "$tuning_file"
   --head-calibration-file "$head_calibration_file"

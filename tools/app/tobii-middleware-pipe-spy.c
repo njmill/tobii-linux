@@ -1150,7 +1150,7 @@ static unsigned char *make_ttp_response(const unsigned char *req, DWORD req_len,
     return out;
 }
 
-static void serve_pipe_once(HANDLE pipe)
+static void __attribute__((unused)) serve_pipe_once(HANDLE pipe)
 {
     unsigned char buf[65536];
     DWORD total_rx = 0, total_tx = 0;
@@ -1231,8 +1231,13 @@ static int connect_client_pipe(HANDLE service_pipe)
     ULONG client_pid = 0;
 
     HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
-    GetNamedPipeClientProcessIdFn get_client_pid =
-        kernel32 ? (GetNamedPipeClientProcessIdFn)GetProcAddress(kernel32, "GetNamedPipeClientProcessId") : NULL;
+    union {
+        FARPROC raw;
+        GetNamedPipeClientProcessIdFn typed;
+    } get_client_pid_proc = {0};
+    if (kernel32)
+        get_client_pid_proc.raw = GetProcAddress(kernel32, "GetNamedPipeClientProcessId");
+    GetNamedPipeClientProcessIdFn get_client_pid = get_client_pid_proc.typed;
     if (get_client_pid && get_client_pid(service_pipe, &client_pid))
         log_line("client_pipe_pid pid=0x%08lx", (unsigned long)client_pid);
     else

@@ -109,9 +109,9 @@ receives:
 - Face pose estimates.
 - Confidence and latency information.
 
-MediaPipe replaced the older OpenSeeFace-primary runtime because it is much more
-stable on the Tobii in-band IR frames. Eye-origin data remains useful for gaze,
-metric anchoring, and fallback diagnostics.
+MediaPipe is the face tracking runtime because it is stable on the Tobii
+in-band IR frames. Eye-origin data remains useful for gaze, metric anchoring,
+and fallback diagnostics.
 
 ### Runtime Supervisor
 
