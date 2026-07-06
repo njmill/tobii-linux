@@ -1,0 +1,9 @@
+.tmp/
+.venv/
+build/
+captures/
+assets/mediapipe/*.task
+assets/mediapipe/*.tmp
+*.pyc
+__pycache__/
+

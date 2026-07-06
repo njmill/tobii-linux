@@ -1,0 +1,91 @@
+@startuml
+title Tobii ET5 to Star Citizen Stock Tobii Runtime
+
+left to right direction
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam packageStyle rectangle
+
+component "Tobii ET5 / EyeChip\nphysical USB device\nUSB 2104:0313" as Tobii
+
+node "Linux host" as Linux {
+  component "tobii-ttp-mux\nlibusb interface 0" as Mux
+  component "eye-pose-dashboard.py\nruntime UI + calibration + tuning" as Dashboard
+  component "MediaPipe Face Landmarker\nPython 3.11/3.12 venv worker" as MediaPipe
+  artifact ".tmp/sc-tobii-native-runtime/sc-tuning.json\nquick tuning" as Tuning
+  artifact ".tmp/sc-tobii-native-runtime/sc-head-calibration.json\nhead calibration" as HeadCal
+  artifact ".tmp/sc-tobii-native-runtime/sc-window.json\nwindow geometry" as WindowState
+}
+
+node "Linux compatibility services" as Services {
+  component "run-sc-tobii-native-runtime.sh\nservice supervisor" as Supervisor
+  component "tobii-middleware-spy.py\nTobii TCP middleware emulator\n127.0.0.1:4455" as TcpMiddleware
+  component "tobii-middleware-pipe-spy.exe\nWine SESP pipe emulator\nhead pose provider" as SespPipe
+  component "ETDefaultPIPE discovery pipe" as ETDefault
+  component "TOBII-* discovery marker pipe" as TobiiPipe
+  component "TOBIIPRP-* discovery marker pipe" as PrpPipe
+  component "analyze-sc-tobii-runtime-logs.py\nstatus and adoption analyzer" as Analyzer
+}
+
+node "Star Citizen Wine prefix" as Wine {
+  component "stock tobii_gameintegration_x64.dll\nbundled with Star Citizen" as StockDll
+  component "StarCitizen.exe\nHeadtrackingSource=Tobii" as SC
+}
+
+Tobii --> Mux : USB vendor/TTP via libusb\ninterface 0\nEP 0x83 in, EP 0x05 out
+Mux --> Dashboard : gaze + eye-origin stream\n0x0500 / native gaze rows
+Mux --> Dashboard : in-band IR image stream\n0x050e
+Mux --> Dashboard : sync/timing stream\n0x1771
+
+Dashboard --> MediaPipe : 280x280 IR frames\npreprocess + timestamps
+MediaPipe --> Dashboard : face landmarks\npose + confidence + latency
+
+Dashboard --> Tuning : save slider changes
+Tuning --> Dashboard : restore on launch
+Dashboard --> HeadCal : save head calibration
+HeadCal --> Dashboard : restore on launch
+Dashboard --> WindowState : save size/position
+WindowState --> Dashboard : restore on launch
+
+Dashboard --> SespPipe : UDP double[12]\nhead-pose target 127.0.0.1:4243\nx,y,z,yaw,pitch,roll,source,counter
+Dashboard --> TcpMiddleware : UDP double[12]\nlive-gaze target 127.0.0.1:4457\ngaze_x,gaze_y,gaze_valid
+
+Supervisor --> TcpMiddleware : start / restart / log
+Supervisor --> SespPipe : start under Wine prefix
+Supervisor --> ETDefault : start under Wine prefix
+Supervisor --> TobiiPipe : start under Wine prefix
+Supervisor --> PrpPipe : start under Wine prefix
+
+ETDefault --> StockDll : Wine named pipe discovery\n\\\\.\\pipe\\ETDefaultPIPE
+TobiiPipe --> StockDll : Wine named pipe discovery\n\\\\.\\pipe\\TOBII-127.0.0.1
+PrpPipe --> StockDll : Wine named pipe discovery\n\\\\.\\pipe\\TOBIIPRP-<serial>
+
+StockDll --> TcpMiddleware : TCP TTP / middleware protocol\nhello, discovery, display area,\nruntime metadata, subscriptions
+TcpMiddleware --> StockDll : device metadata + capabilities\npresence stream 0x0504\ngaze stream 0x0500
+TcpMiddleware --> StockDll : async gaze events\nfrom dashboard live gaze UDP
+
+StockDll --> SespPipe : SESP provider pipe\ninitialize, display info,\nfeature/status, head-pose channel
+SespPipe --> StockDll : display/provider replies\nlive head pose events
+
+SC --> StockDll : load bundled DLL\nGetApi / TrackWindow / Update
+StockDll --> SC : native Tobii head pose\ngaze point / target selection
+
+Analyzer ..> TcpMiddleware : read middleware-spy.log
+Analyzer ..> SespPipe : read middleware-pipe-spy.log
+Analyzer ..> ETDefault : read discovery logs
+Analyzer ..> TobiiPipe : read discovery logs
+Analyzer ..> PrpPipe : read discovery logs
+
+note bottom of StockDll
+The normal runtime path uses the stock game DLL.
+No Star Citizen Bin64 files are modified.
+No process injection is required.
+end note
+
+note bottom of Dashboard
+Dashboard pose and gaze are independent:
+head pose is smoothed/tuned for cockpit camera,
+gaze remains responsive for target selection.
+end note
+
+@enduml

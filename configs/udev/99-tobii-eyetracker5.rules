@@ -1,0 +1,4 @@
+# Tobii Eye Tracker 5 / EyeChip
+# Allows local users in plugdev to access the vendor interface through libusb.
+SUBSYSTEM=="usb", ATTR{idVendor}=="2104", ATTR{idProduct}=="0313", GROUP="plugdev", MODE="0660", TAG+="uaccess"
+
