@@ -1084,6 +1084,10 @@ class MediaPipeFaceBridge:
         self.log_dir = log_dir
         self.worker = MediaPipeWorkerClient(root_dir, args)
         self.thread: threading.Thread | None = None
+        self.processor_thread: threading.Thread | None = None
+        self.pending_frame_path: Path | None = None
+        self.pending_frame_elapsed_ms = 0.0
+        self.pending_condition = threading.Condition()
         self.stop = threading.Event()
         self.frames_seen = 0
         self.frames_sent = 0
@@ -1108,10 +1112,14 @@ class MediaPipeFaceBridge:
 
     def attach_mux_stdout(self, stdout) -> None:
         self.thread = threading.Thread(target=self._run_frame_bridge, args=(stdout,), name="mediapipe-frame-bridge", daemon=True)
+        self.processor_thread = threading.Thread(target=self._run_frame_processor, name="mediapipe-frame-processor", daemon=True)
+        self.processor_thread.start()
         self.thread.start()
 
     def terminate(self) -> None:
         self.stop.set()
+        with self.pending_condition:
+            self.pending_condition.notify_all()
         self.worker.close()
 
     def snapshot(self) -> MediaPipeFaceSample | None:
@@ -1141,11 +1149,29 @@ class MediaPipeFaceBridge:
             wanted_stream = self.args.mediapipe_image_stream.lower().removeprefix("0x")
             if wanted_stream and f"stream{wanted_stream}" not in path.name.lower():
                 continue
-            self.feed_frame(path)
+            with self.pending_condition:
+                # Keep only the freshest frame. MediaPipe can be slower than the
+                # mux frame stream; blocking this stdout reader can stall gaze too.
+                self.pending_frame_path = path
+                self.pending_frame_elapsed_ms = time.monotonic() * 1000.0
+                self.pending_condition.notify()
 
-    def feed_frame(self, path: Path) -> None:
+    def _run_frame_processor(self) -> None:
+        while not self.stop.is_set():
+            with self.pending_condition:
+                while self.pending_frame_path is None and not self.stop.is_set():
+                    self.pending_condition.wait(timeout=0.25)
+                if self.stop.is_set():
+                    break
+                path = self.pending_frame_path
+                elapsed_ms = self.pending_frame_elapsed_ms
+                self.pending_frame_path = None
+            if path is not None:
+                self.feed_frame(path, elapsed_ms)
+
+    def feed_frame(self, path: Path, elapsed_ms: float | None = None) -> None:
         try:
-            result = self.worker.process(path, time.monotonic() * 1000.0)
+            result = self.worker.process(path, elapsed_ms if elapsed_ms is not None else time.monotonic() * 1000.0)
             self.frames_sent += 1
             now = time.monotonic()
             sample = self.sample_from_result(result, now)
@@ -1681,6 +1707,9 @@ class EyePoseDashboard:
         self.face_handoff_yaw_bias = 0.0
         self.face_handoff_pitch_bias = 0.0
         self.face_handoff_active = False
+        self.last_mediapipe_pose: EyePose | None = None
+        self.last_mediapipe_pose_monotonic = 0.0
+        self.last_mediapipe_pose_confidence = 0.0
         self.pitch_up_hold: float | None = None
         self.pitch_debug_trace: deque[dict[str, object]] = deque(maxlen=max(240, int(args.pitch_debug_seconds * 140)))
         self.pitch_debug_raw: float | None = None
@@ -2258,28 +2287,44 @@ class EyePoseDashboard:
 
     def face_confidence(self, now: float) -> float:
         sample = self.latest_mediapipe
-        if sample is None or not sample.usable:
-            return 0.0
-        age = now - sample.seen_monotonic
-        if age > self.args.mediapipe_max_age_s:
-            return 0.0
-        age_score = 1.0 - clamp(age / max(self.args.mediapipe_max_age_s, 0.001), 0.0, 1.0)
-        return clamp(sample.confidence * max(age_score, 0.35), 0.0, 1.0)
+        if sample is not None and sample.usable:
+            age = now - sample.seen_monotonic
+            if age <= self.args.mediapipe_max_age_s:
+                age_score = 1.0 - clamp(age / max(self.args.mediapipe_max_age_s, 0.001), 0.0, 1.0)
+                return clamp(sample.confidence * max(age_score, 0.35), 0.0, 1.0)
+
+        held_age = now - self.last_mediapipe_pose_monotonic
+        if self.last_mediapipe_pose is not None and held_age <= self.args.mediapipe_pose_hold_s:
+            hold_score = 1.0 - clamp(held_age / max(self.args.mediapipe_pose_hold_s, 0.001), 0.0, 1.0)
+            return clamp(self.last_mediapipe_pose_confidence * max(hold_score, 0.35), 0.18, 0.75)
+        return 0.0
 
     def fused_pose(self, eye_pose: EyePose, confidence: PoseConfidence, now: float) -> tuple[EyePose, str]:
         face_primary = self.args.tobii_head_pose_source == "face"
         face_pose = self.face_fallback_pose(use_handoff=not face_primary)
         face_conf = self.face_confidence(now)
         confidence.face = face_conf
-        if face_pose is None or face_conf <= 0.0 or self.args.tobii_head_pose_source == "eye":
+
+        if self.args.tobii_head_pose_source == "eye":
             confidence.blended = confidence.eye
             self.face_handoff_active = False
             return eye_pose, "eye binocular"
 
         if face_primary:
             self.face_handoff_active = False
-            confidence.blended = clamp(face_conf * max(confidence.eye, 0.35), 0.0, 1.0)
-            return face_pose, self.face_primary_source_name()
+            if face_pose is not None and face_conf > 0.0:
+                confidence.blended = clamp(max(face_conf, 0.35) * max(confidence.eye, 0.35), 0.0, 1.0)
+                return face_pose, self.face_primary_source_name()
+            if self.pose is not None:
+                confidence.blended = 0.18
+                return self.pose, self.face_primary_source_name()
+            confidence.blended = confidence.eye
+            return eye_pose, "eye binocular"
+
+        if face_pose is None or face_conf <= 0.0:
+            confidence.blended = confidence.eye
+            self.face_handoff_active = False
+            return eye_pose, "eye binocular"
 
         # Fade toward face as eye confidence drops, at high yaw, or during pitch-up
         # where the eye-origin vertical proxy is known to snap.
@@ -2355,6 +2400,11 @@ class EyePoseDashboard:
         face_primary = self.args.tobii_head_pose_source == "face"
         fallback = self.face_fallback_pose(use_handoff=not face_primary)
         if fallback is None:
+            if face_primary and self.pose is not None:
+                self.pose_source = self.face_primary_source_name()
+                self.confidence = PoseConfidence(eye=0.0, face=0.0, blended=0.18, pitch=0.0)
+                self.pose_trail.append((self.pose.yaw, self.pose.pitch_proxy))
+                return True
             return False
         if not face_primary and self.pose is not None and self.pose.pitch_proxy >= self.args.eye_pitch_up_edge_deg:
             allowed_drop = max(self.args.pitch_snapback_guard_deg, 0.01)
@@ -2515,10 +2565,18 @@ class EyePoseDashboard:
         return (self.raw_pose.tx, self.raw_pose.ty, tz)
 
     def mediapipe_fallback_pose(self, use_handoff: bool = True) -> EyePose | None:
+        now = time.monotonic()
         corrected_yaw = self.corrected_mediapipe_yaw()
         corrected_pitch = self.corrected_mediapipe_pitch()
         corrected_roll = self.corrected_mediapipe_roll()
         if corrected_yaw is None and corrected_pitch is None and corrected_roll is None:
+            if (
+                self.args.tobii_head_pose_source == "face"
+                and self.last_mediapipe_pose is not None
+                and now - self.last_mediapipe_pose_monotonic <= self.args.mediapipe_pose_hold_s
+            ):
+                self.pitch_debug_status = "mediapipe source hold"
+                return self.last_mediapipe_pose
             return None
         base = self.pose if self.pose is not None else self.raw_pose
         if base is None:
@@ -2537,7 +2595,7 @@ class EyePoseDashboard:
         if translation is None:
             translation = self.corrected_mediapipe_translation()
         tx, ty, tz = translation if translation is not None else (base.tx, base.ty, base.tz)
-        return EyePose(
+        pose = EyePose(
             yaw=corrected_yaw if corrected_yaw is not None else base.yaw,
             pitch_proxy=corrected_pitch if corrected_pitch is not None else base.pitch_proxy,
             roll=corrected_roll if corrected_roll is not None else base.roll,
@@ -2547,6 +2605,11 @@ class EyePoseDashboard:
             eye_distance=base.eye_distance,
             eye_distance_delta=base.eye_distance_delta,
         )
+        self.last_mediapipe_pose = pose
+        self.last_mediapipe_pose_monotonic = now
+        sample = self.latest_mediapipe
+        self.last_mediapipe_pose_confidence = sample.confidence if sample is not None else 0.75
+        return pose
 
     def sample_rate(self) -> float:
         if len(self.packet_times) < 2:
@@ -3365,8 +3428,6 @@ def load_tuning(args: argparse.Namespace) -> None:
             setattr(args, attr, value)
         elif isinstance(value, (int, float)):
             setattr(args, attr, float(value))
-
-
 def load_window_geometry(args: argparse.Namespace) -> str:
     state_file = getattr(args, "window_state_file", None)
     if state_file is None or not state_file.exists():
@@ -3451,6 +3512,7 @@ def main() -> int:
     parser.add_argument("--mediapipe-min-tracking-confidence", type=float, default=0.35)
     parser.add_argument("--mediapipe-min-face-confidence", type=float, default=0.35)
     parser.add_argument("--mediapipe-max-age-s", type=float, default=0.35)
+    parser.add_argument("--mediapipe-pose-hold-s", type=float, default=0.55, help="Keep the last good MediaPipe pose through brief face-tracking gaps before falling back.")
     parser.add_argument("--mediapipe-yaw-sign", type=float, default=1.0)
     parser.add_argument("--mediapipe-pitch-sign", type=float, default=1.0)
     parser.add_argument("--mediapipe-roll-sign", type=float, default=1.0)

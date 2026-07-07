@@ -94,6 +94,24 @@ wait_tcp_port_free() {
   return 1
 }
 
+cleanup_tcp_port_listener() {
+  local port="$1"
+  kill_tcp_port_listeners_except_self "$port"
+  if ! wait_tcp_port_free "$port" 20; then
+    echo "warning: TCP middleware port $port still busy after graceful cleanup; forcing listeners down" >&2
+    while read -r pid; do
+      [[ -z "$pid" ]] && continue
+      [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && continue
+      kill -9 "$pid" 2>/dev/null || true
+    done < <(
+      ss -H -ltnp "sport = :$port" 2>/dev/null \
+        | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+        | sort -u
+    )
+    wait_tcp_port_free "$port" 10 || true
+  fi
+}
+
 restart_services_or_exit() {
   local name="$1"
   local log_path="$2"
@@ -113,20 +131,7 @@ if [[ "$mode" == "services" ]]; then
   write_pidfile runtime-services "$$"
   kill_runtime_pidfiles
   write_pidfile runtime-services "$$"
-  kill_tcp_port_listeners_except_self "$middleware_port"
-  if ! wait_tcp_port_free "$middleware_port" 20; then
-    echo "warning: TCP middleware port $middleware_port still busy after graceful cleanup; forcing listeners down" >&2
-    while read -r pid; do
-      [[ -z "$pid" ]] && continue
-      [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && continue
-      kill -9 "$pid" 2>/dev/null || true
-    done < <(
-      ss -H -ltnp "sport = :$middleware_port" 2>/dev/null \
-        | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
-        | sort -u
-    )
-    wait_tcp_port_free "$middleware_port" 10 || true
-  fi
+  cleanup_tcp_port_listener "$middleware_port"
   sleep 0.2
 fi
 
@@ -143,6 +148,7 @@ fi
 
 if [[ "${SC_POC_KEEP_EXISTING_CAPTURE:-0}" != "1" ]]; then
   kill_runtime_pidfiles
+  cleanup_tcp_port_listener "$middleware_port"
   sleep 0.3
 fi
 

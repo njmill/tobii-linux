@@ -1699,11 +1699,11 @@ int main(int argc, char **argv) {
                             image.bpp,
                             image.payload_len,
                             frame_path);
+                    fflush(events);
                     printf("private_frame_dump path=%s\n", frame_path);
+                    fflush(stdout);
                     if (now_ns >= next_file_flush_ns) {
-                        fflush(events);
                         fflush(csv);
-                        fflush(stdout);
                         next_file_flush_ns = now_ns + 1000000000ull;
                     }
                 }
@@ -1725,8 +1725,8 @@ int main(int argc, char **argv) {
                         (unsigned long long)sync.timestamp,
                         (unsigned long long)sync.receive_timestamp,
                         frame.plen);
+                fflush(events);
                 if (now_ns >= next_file_flush_ns) {
-                    fflush(events);
                     fflush(csv);
                     next_file_flush_ns = now_ns + 1000000000ull;
                 }
@@ -1748,8 +1748,8 @@ int main(int argc, char **argv) {
                             index,
                             frame.plen,
                             payload_path);
+                    fflush(events);
                     if (now_ns >= next_file_flush_ns) {
-                        fflush(events);
                         fflush(csv);
                         next_file_flush_ns = now_ns + 1000000000ull;
                     }
@@ -1768,8 +1768,8 @@ int main(int argc, char **argv) {
         if (sample.eye_present_r == 1) right_eye_present_packets++;
         write_csv_sample(csv, label, start_ns, now_ns, decoded_packets, &frame, &sample);
         decoded_packets++;
+        fflush(csv);
         if (now_ns >= next_file_flush_ns) {
-            fflush(csv);
             fflush(events);
             next_file_flush_ns = now_ns + 1000000000ull;
         }

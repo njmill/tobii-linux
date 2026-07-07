@@ -172,6 +172,7 @@ pose delivery.
 ## Acknowledgements
 
 Several open source projects and community experiments around Tobii Eye Tracker 5 protocol decoding were very helpful in getting this up and running. Those include:
-
+- [tobiifree](https://github.com/Aetherall/tobiifree)
 - [tobii_eye_tracker_linux_installer](https://github.com/megagtrwrath/tobii_eye_tracker_linux_installer)
 - [opentrack](https://github.com/megagtrwrath/opentrack)
+- [MediaPipe](https://github.com/google-ai-edge/mediapipe)
