@@ -15,7 +15,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from tkinter import BOTH, Button, Canvas, Frame, Label, StringVar, Tk, Toplevel
+from tkinter import BOTH, Canvas, Tk, Toplevel
 from typing import Callable
 
 
@@ -39,6 +39,8 @@ BLUE = "#53b7ff"
 GREEN = "#46d97d"
 YELLOW = "#f8d66d"
 RED = "#ff7b7b"
+TOBII_ET5_MARKER_SPACING_MM = 184.0
+DEFAULT_WINDOW_GEOMETRY = "1680x1050"
 
 TUNING_ATTRS = (
     "opentrack_yaw_scale",
@@ -61,6 +63,8 @@ TUNING_ATTRS = (
     "mediapipe_yaw_output_scale",
     "mediapipe_pitch_output_scale",
     "mediapipe_roll_output_scale",
+    "mediapipe_translation_output_scale",
+    "mediapipe_depth_output_scale",
     "mediapipe_pitch_yaw_comp",
     "opentrack_max_output_angle",
     "harness",
@@ -72,9 +76,9 @@ DEFAULT_TUNING_VALUES: dict[str, float | str] = {
     "opentrack_yaw_scale": 8.0,
     "opentrack_pitch_scale": -14.0,
     "opentrack_roll_scale": 1.0,
-    "opentrack_x_scale": 1.0,
-    "opentrack_y_scale": 1.0,
-    "opentrack_z_scale": 1.0,
+    "opentrack_x_scale": -3.0,
+    "opentrack_y_scale": 3.0,
+    "opentrack_z_scale": 4.0,
     "opentrack_output_smoothing": 0.03,
     "opentrack_motion_smoothing": 0.05,
     "opentrack_prediction_ms": 45.0,
@@ -89,41 +93,14 @@ DEFAULT_TUNING_VALUES: dict[str, float | str] = {
     "mediapipe_yaw_output_scale": 0.15,
     "mediapipe_pitch_output_scale": 0.10,
     "mediapipe_roll_output_scale": 0.15,
+    "mediapipe_translation_output_scale": 10.0,
+    "mediapipe_depth_output_scale": 250.0,
     "mediapipe_pitch_yaw_comp": 1.0,
     "opentrack_max_output_angle": 160.0,
     "harness": "tobii",
     "tobii_roll_source": "pose",
     "tobii_head_pose_source": "face",
 }
-
-HEAD_CALIBRATION_BINS = (
-    ("yaw_left", "yaw L"),
-    ("yaw_center", "yaw C"),
-    ("yaw_right", "yaw R"),
-    ("pitch_down", "pitch D"),
-    ("pitch_center", "pitch C"),
-    ("pitch_up", "pitch U"),
-    ("roll_left", "roll L"),
-    ("roll_center", "roll C"),
-    ("roll_right", "roll R"),
-    ("near", "near"),
-    ("far", "far"),
-)
-
-HEAD_CALIBRATION_PHASES = (
-    (
-        "neutral",
-        "Sit naturally, face the center, and keep your head still.",
-        ("yaw_center", "pitch_center", "roll_center"),
-    ),
-    ("yaw_left", "Slowly turn your head left and pause at your comfortable limit.", ("yaw_left",)),
-    ("yaw_right", "Slowly turn your head right and pause at your comfortable limit.", ("yaw_right",)),
-    ("pitch_up", "Return to center, then slowly tilt your head up and hold the highest stable angle.", ("pitch_up",)),
-    ("pitch_down", "Return to center, then slowly tilt your head down and pause at your comfortable limit.", ("pitch_down",)),
-    ("roll_left", "Return to center, then tilt your head toward your left shoulder and pause.", ("roll_left",)),
-    ("roll_right", "Return to center, then tilt your head toward your right shoulder and pause.", ("roll_right",)),
-)
-
 
 @dataclass
 class EyeSample:
@@ -220,32 +197,6 @@ class HQFrameStatus:
 
 
 @dataclass
-class HeadCalibrationProfile:
-    yaw_left_scale: float = 1.0
-    yaw_right_scale: float = 1.0
-    yaw_left_sign: float = -1.0
-    yaw_right_sign: float = 1.0
-    pitch_up_scale: float = 1.0
-    pitch_down_scale: float = 1.0
-    pitch_up_sign: float = 1.0
-    pitch_down_sign: float = -1.0
-    roll_left_scale: float = 1.0
-    roll_right_scale: float = 1.0
-    roll_left_sign: float = -1.0
-    roll_right_sign: float = 1.0
-    face_yaw_neutral: float | None = None
-    face_pitch_neutral: float | None = None
-    face_roll_neutral: float | None = None
-    pitch_up_mid_raw: float | None = None
-    pitch_up_mid_value: float | None = None
-    pitch_up_max_raw: float | None = None
-    pitch_up_max_value: float | None = None
-    pitch_down_raw: float | None = None
-    pitch_down_value: float | None = None
-    created: float = 0.0
-
-
-@dataclass
 class MediaPipeFaceSample:
     frame: int
     seen_monotonic: float
@@ -256,6 +207,8 @@ class MediaPipeFaceSample:
     tx: float
     ty: float
     tz: float
+    face_width: float
+    face_height: float
     landmarks: int
     latency_ms: float
     error: str = ""
@@ -263,6 +216,73 @@ class MediaPipeFaceSample:
     @property
     def usable(self) -> bool:
         return self.confidence > 0.0 and all(math.isfinite(value) for value in (self.yaw, self.pitch, self.roll))
+
+
+@dataclass
+class MonitorInfo:
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+    primary: bool = False
+
+
+@dataclass
+class ScreenCalibrationProfile:
+    version: int
+    created_unix: float
+    monitor_name: str
+    monitor_x: int
+    monitor_y: int
+    width_px: int
+    height_px: int
+    marker_spacing_mm: float
+    marker_spacing_px: float
+    px_per_mm: float
+    mm_per_px: float
+    device_center_x_px: float
+    device_center_y_px: float
+
+    @classmethod
+    def from_json(cls, data: object) -> "ScreenCalibrationProfile | None":
+        if not isinstance(data, dict):
+            return None
+        try:
+            return cls(
+                version=int(data.get("version", 1)),
+                created_unix=float(data.get("created_unix", 0.0)),
+                monitor_name=str(data.get("monitor_name", "")),
+                monitor_x=int(data.get("monitor_x", 0)),
+                monitor_y=int(data.get("monitor_y", 0)),
+                width_px=int(data.get("width_px", 0)),
+                height_px=int(data.get("height_px", 0)),
+                marker_spacing_mm=float(data.get("marker_spacing_mm", TOBII_ET5_MARKER_SPACING_MM)),
+                marker_spacing_px=float(data.get("marker_spacing_px", 0.0)),
+                px_per_mm=float(data.get("px_per_mm", 0.0)),
+                mm_per_px=float(data.get("mm_per_px", 0.0)),
+                device_center_x_px=float(data.get("device_center_x_px", 0.0)),
+                device_center_y_px=float(data.get("device_center_y_px", 0.0)),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def to_json(self) -> dict[str, float | int | str]:
+        return {
+            "version": self.version,
+            "created_unix": self.created_unix,
+            "monitor_name": self.monitor_name,
+            "monitor_x": self.monitor_x,
+            "monitor_y": self.monitor_y,
+            "width_px": self.width_px,
+            "height_px": self.height_px,
+            "marker_spacing_mm": self.marker_spacing_mm,
+            "marker_spacing_px": self.marker_spacing_px,
+            "px_per_mm": self.px_per_mm,
+            "mm_per_px": self.mm_per_px,
+            "device_center_x_px": self.device_center_x_px,
+            "device_center_y_px": self.device_center_y_px,
+        }
 
 
 class SmoothValue:
@@ -321,50 +341,415 @@ def blend_pose(a: EyePose, b: EyePose, b_weight: float) -> EyePose:
     )
 
 
-def profile_has_pitch_map(profile: HeadCalibrationProfile) -> bool:
-    return (
-        profile.pitch_up_mid_raw is not None
-        and profile.pitch_up_mid_value is not None
-        and profile.pitch_up_max_raw is not None
-        and profile.pitch_up_max_value is not None
-    )
+def detect_monitors(root: Tk) -> list[MonitorInfo]:
+    monitors: list[MonitorInfo] = []
+    try:
+        proc = subprocess.run(
+            ["xrandr", "--query"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        for line in proc.stdout.splitlines():
+            parts = line.split()
+            if " connected" not in line:
+                continue
+            name = parts[0]
+            primary = " primary " in f" {line} "
+            for part in parts[1:]:
+                if "x" not in part or "+" not in part:
+                    continue
+                try:
+                    size, x_text, y_text = part.split("+", 2)
+                    width_text, height_text = size.split("x", 1)
+                    monitors.append(
+                        MonitorInfo(
+                            name=name,
+                            x=int(x_text),
+                            y=int(y_text),
+                            width=int(width_text),
+                            height=int(height_text),
+                            primary=primary,
+                        )
+                    )
+                    break
+                except ValueError:
+                    continue
+    if monitors:
+        return monitors
+    return [
+        MonitorInfo(
+            name="primary",
+            x=0,
+            y=0,
+            width=max(root.winfo_screenwidth(), 1),
+            height=max(root.winfo_screenheight(), 1),
+            primary=True,
+        )
+    ]
 
 
-def scaled_pose(pose: EyePose, profile: HeadCalibrationProfile, scale_pitch: bool = True) -> EyePose:
-    if pose.yaw == 0.0:
-        yaw_scale = 1.0
-    elif profile.yaw_left_sign * pose.yaw > 0.0:
-        yaw_scale = profile.yaw_left_scale
-    elif profile.yaw_right_sign * pose.yaw > 0.0:
-        yaw_scale = profile.yaw_right_scale
-    else:
-        yaw_scale = profile.yaw_left_scale if pose.yaw < 0.0 else profile.yaw_right_scale
-    if not scale_pitch or pose.pitch_proxy == 0.0:
-        pitch_scale = 1.0
-    elif profile.pitch_up_sign * pose.pitch_proxy > 0.0:
-        pitch_scale = profile.pitch_up_scale
-    elif profile.pitch_down_sign * pose.pitch_proxy > 0.0:
-        pitch_scale = profile.pitch_down_scale
-    else:
-        pitch_scale = profile.pitch_down_scale if pose.pitch_proxy < 0.0 else profile.pitch_up_scale
-    if pose.roll == 0.0:
-        roll_scale = 1.0
-    elif profile.roll_left_sign * pose.roll > 0.0:
-        roll_scale = profile.roll_left_scale
-    elif profile.roll_right_sign * pose.roll > 0.0:
-        roll_scale = profile.roll_right_scale
-    else:
-        roll_scale = profile.roll_left_scale if pose.roll < 0.0 else profile.roll_right_scale
-    return EyePose(
-        yaw=pose.yaw * yaw_scale,
-        pitch_proxy=pose.pitch_proxy * pitch_scale,
-        roll=pose.roll * roll_scale,
-        tx=pose.tx,
-        ty=pose.ty,
-        tz=pose.tz,
-        eye_distance=pose.eye_distance,
-        eye_distance_delta=pose.eye_distance_delta,
-    )
+def load_screen_calibration(path: Path | None) -> ScreenCalibrationProfile | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return ScreenCalibrationProfile.from_json(data)
+
+
+def save_screen_calibration(path: Path | None, profile: ScreenCalibrationProfile) -> bool:
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(profile.to_json(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+        return True
+    except OSError:
+        return False
+
+
+def load_gaze_calibration(path: Path | None) -> tuple[list[float], list[float]] | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    x_coeffs = data.get("x_coeffs")
+    y_coeffs = data.get("y_coeffs")
+    if not isinstance(x_coeffs, list) or not isinstance(y_coeffs, list):
+        return None
+    try:
+        x_values = [float(value) for value in x_coeffs]
+        y_values = [float(value) for value in y_coeffs]
+    except (TypeError, ValueError):
+        return None
+    if len(x_values) != 6 or len(y_values) != 6:
+        return None
+    if not all(math.isfinite(value) for value in (*x_values, *y_values)):
+        return None
+    return (x_values, y_values)
+
+
+def save_gaze_calibration(path: Path | None, affine: tuple[list[float], list[float]]) -> bool:
+    if path is None:
+        return False
+    x_coeffs, y_coeffs = affine
+    data = {
+        "version": 1,
+        "created_unix": time.time(),
+        "x_coeffs": [float(value) for value in x_coeffs],
+        "y_coeffs": [float(value) for value in y_coeffs],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+        return True
+    except OSError:
+        return False
+
+
+def delete_file_quietly(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def tk_geometry(width: int, height: int, x: int = 0, y: int = 0) -> str:
+    return f"{width}x{height}{x:+d}{y:+d}"
+
+
+class ScreenCalibrationWindow:
+    def __init__(
+        self,
+        parent: Tk,
+        profile_file: Path | None,
+        initial_profile: ScreenCalibrationProfile | None,
+        on_saved: Callable[[ScreenCalibrationProfile], None],
+    ) -> None:
+        self.parent = parent
+        self.profile_file = profile_file
+        self.initial_profile = initial_profile
+        self.on_saved = on_saved
+        self.monitors = detect_monitors(parent)
+        self.monitor: MonitorInfo | None = None
+        self.window: Toplevel | None = None
+        self.canvas: Canvas | None = None
+        self.left_x = 0.0
+        self.right_x = 0.0
+        self.drag_mode: str | None = None
+        self.save_buttons: list[tuple[float, float, float, float]] = []
+        self.open_picker()
+
+    def open_picker(self) -> None:
+        win = Toplevel(self.parent)
+        win.title("Tobii Screen Calibration - Select Display")
+        win.configure(background=BG)
+        win.geometry("560x360")
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        canvas = Canvas(win, background=BG, highlightthickness=0)
+        canvas.pack(fill=BOTH, expand=True)
+        self.window = win
+        self.canvas = canvas
+        canvas.bind("<Button-1>", self.on_picker_click)
+        win.bind("<Escape>", lambda _event: self.close())
+        self.draw_picker()
+
+    def draw_picker(self) -> None:
+        if self.canvas is None:
+            return
+        canvas = self.canvas
+        canvas.delete("all")
+        w = max(canvas.winfo_width(), 560)
+        canvas.create_text(28, 28, anchor="nw", fill=TEXT, font=("Sans", 20, "bold"), text="Choose calibration display")
+        canvas.create_text(
+            28,
+            64,
+            anchor="nw",
+            fill=MUTED,
+            font=("Sans", 12),
+            text="Pick the monitor that Star Citizen uses. The next screen shows alignment guides.",
+        )
+        y = 112
+        for index, monitor in enumerate(self.monitors):
+            label = f"{monitor.name}  {monitor.width}x{monitor.height}+{monitor.x}+{monitor.y}"
+            if monitor.primary:
+                label += "  primary"
+            canvas.create_rectangle(28, y, w - 28, y + 54, fill="#121922", outline=STROKE)
+            canvas.create_text(44, y + 17, anchor="nw", fill=TEXT, font=("Sans", 13, "bold"), text=label)
+            canvas.create_text(44, y + 36, anchor="nw", fill=MUTED, font=("Sans", 9), text=f"display {index + 1}")
+            y += 66
+        canvas.create_text(28, y + 18, anchor="nw", fill="#6b7788", font=("Sans", 10), text="Esc cancels")
+
+    def on_picker_click(self, event) -> None:
+        y = 112
+        for monitor in self.monitors:
+            if 28 <= event.x and y <= event.y <= y + 54:
+                self.open_calibration(monitor)
+                return
+            y += 66
+
+    def open_calibration(self, monitor: MonitorInfo) -> None:
+        if self.window is not None:
+            self.window.destroy()
+        self.monitor = monitor
+        win = Toplevel(self.parent)
+        win.title(f"Tobii Screen Calibration - {monitor.name}")
+        win.configure(background=BG)
+        win.geometry(tk_geometry(monitor.width, monitor.height, monitor.x, monitor.y))
+        win.update_idletasks()
+        win.attributes("-fullscreen", True)
+        win.attributes("-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        canvas = Canvas(win, background=BG, highlightthickness=0)
+        canvas.pack(fill=BOTH, expand=True)
+        self.window = win
+        self.canvas = canvas
+
+        if self.initial_profile and self.initial_profile.monitor_name == monitor.name:
+            self.left_x = self.initial_profile.device_center_x_px - self.initial_profile.marker_spacing_px * 0.5
+            self.right_x = self.initial_profile.device_center_x_px + self.initial_profile.marker_spacing_px * 0.5
+        else:
+            spacing = min(monitor.width * 0.46, max(260.0, monitor.width * 0.24))
+            self.left_x = monitor.width * 0.5 - spacing * 0.5
+            self.right_x = monitor.width * 0.5 + spacing * 0.5
+        self.clamp_guides()
+
+        canvas.bind("<Button-1>", self.on_calibration_press)
+        canvas.bind("<B1-Motion>", self.on_calibration_drag)
+        canvas.bind("<ButtonRelease-1>", self.on_calibration_release)
+        win.bind("<Escape>", lambda _event: self.close())
+        win.bind("q", lambda _event: self.close())
+        win.bind("s", lambda _event: self.save())
+        win.bind("<Return>", lambda _event: self.save())
+        win.bind("<Left>", lambda event: self.nudge(-1 if not event.state & 0x1 else -10, 0, 0))
+        win.bind("<Right>", lambda event: self.nudge(1 if not event.state & 0x1 else 10, 0, 0))
+        win.bind("+", lambda _event: self.nudge(0, 0, 2))
+        win.bind("=", lambda _event: self.nudge(0, 0, 2))
+        win.bind("-", lambda _event: self.nudge(0, 0, -2))
+        self.draw_calibration()
+
+    def close(self) -> None:
+        if self.window is not None:
+            self.window.destroy()
+        self.window = None
+        self.canvas = None
+
+    def clamp_guides(self) -> None:
+        if self.monitor is None:
+            return
+        min_spacing = 80.0
+        max_spacing = max(min_spacing, self.monitor.width - 40.0)
+        spacing = clamp(self.right_x - self.left_x, min_spacing, max_spacing)
+        center = clamp((self.left_x + self.right_x) * 0.5, spacing * 0.5 + 20.0, self.monitor.width - spacing * 0.5 - 20.0)
+        self.left_x = center - spacing * 0.5
+        self.right_x = center + spacing * 0.5
+
+    def draw_calibration(self) -> None:
+        if self.canvas is None or self.monitor is None:
+            return
+        canvas = self.canvas
+        canvas.delete("all")
+        w = max(canvas.winfo_width(), self.monitor.width)
+        h = max(canvas.winfo_height(), self.monitor.height)
+        spacing = max(self.right_x - self.left_x, 1.0)
+        px_per_mm = spacing / TOBII_ET5_MARKER_SPACING_MM
+        mm_per_px = TOBII_ET5_MARKER_SPACING_MM / spacing
+        center_x = (self.left_x + self.right_x) * 0.5
+
+        for ratio in (0.25, 0.5, 0.75):
+            canvas.create_line(w * ratio, 0, w * ratio, h, fill="#101820")
+            canvas.create_line(0, h * ratio, w, h * ratio, fill="#101820")
+        canvas.create_line(self.left_x, 0, self.left_x, h, fill=GREEN, width=4)
+        canvas.create_line(self.right_x, 0, self.right_x, h, fill=GREEN, width=4)
+        canvas.create_line(center_x, 0, center_x, h, fill=YELLOW, width=2, dash=(8, 8))
+        canvas.create_oval(center_x - 11, h - 28, center_x + 11, h - 6, outline=YELLOW, width=3)
+
+        panel_w = min(w - 56, 860)
+        panel_h = 184
+        panel_x = 28
+        panel_y = 28
+        canvas.create_rectangle(panel_x, panel_y, panel_x + panel_w, panel_y + panel_h, fill="#0d1218", outline=STROKE)
+        canvas.create_text(48, 48, anchor="nw", fill=TEXT, font=("Sans", 20, "bold"), text="Align Tobii ET5 physical markers")
+        canvas.create_text(
+            48,
+            84,
+            anchor="nw",
+            fill=MUTED,
+            font=("Sans", 12),
+            width=max(320, panel_w - 40),
+            text="Drag the green vertical lines onto the two white ET5 device marks. The ET5 is assumed to be mounted below the selected display.",
+        )
+        canvas.create_text(
+            48,
+            126,
+            anchor="nw",
+            fill=TEXT,
+            font=("Sans", 12),
+            width=max(320, panel_w - 40),
+            text=f"{self.monitor.name}: {self.monitor.width}x{self.monitor.height}+{self.monitor.x}+{self.monitor.y}    spacing {spacing:.1f}px = {TOBII_ET5_MARKER_SPACING_MM:.0f}mm",
+        )
+        canvas.create_text(
+            48,
+            154,
+            anchor="nw",
+            fill=TEXT,
+            font=("Sans", 12),
+            width=max(320, panel_w - 40),
+            text=f"device center x {center_x:.1f}px at display bottom    {px_per_mm:.3f}px/mm  {mm_per_px:.4f}mm/px",
+        )
+
+        button_w = 142
+        button_h = 42
+        self.save_buttons = []
+        panel_button_x = panel_x + panel_w - button_w - 18
+        panel_button_y = panel_y + panel_h - button_h - 18
+        self.draw_save_button(panel_button_x, panel_button_y, button_w, button_h)
+        bottom_button_x = w - button_w - 28
+        bottom_button_y = h - button_h - 24
+        self.draw_save_button(bottom_button_x, bottom_button_y, button_w, button_h)
+        canvas.create_text(
+            48,
+            h - 42,
+            anchor="sw",
+            fill="#6b7788",
+            font=("Sans", 10),
+            width=max(320, w - button_w - 112),
+            text="Drag green lines to align with the ET5 marks. Left/right arrows move center, +/- changes spacing, Shift+arrow moves faster. Enter/s saves, Esc/q cancels.",
+        )
+
+    def draw_save_button(self, x: float, y: float, w: float, h: float) -> None:
+        if self.canvas is None:
+            return
+        self.save_buttons.append((x, y, x + w, y + h))
+        self.canvas.create_rectangle(x, y, x + w, y + h, fill="#1e3652", outline=BLUE, width=2)
+        self.canvas.create_text(x + w / 2, y + h / 2, anchor="center", fill=TEXT, font=("Sans", 13, "bold"), text="Save")
+
+    def on_calibration_press(self, event) -> None:
+        for x1, y1, x2, y2 in self.save_buttons:
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                self.drag_mode = None
+                self.save()
+                return
+        center_x = (self.left_x + self.right_x) * 0.5
+        if abs(event.x - self.left_x) < 24:
+            self.drag_mode = "left"
+        elif abs(event.x - self.right_x) < 24:
+            self.drag_mode = "right"
+        elif abs(event.x - center_x) < 36:
+            self.drag_mode = "pair"
+        else:
+            self.drag_mode = "pair"
+
+    def on_calibration_drag(self, event) -> None:
+        if self.monitor is None:
+            return
+        if self.drag_mode == "left":
+            self.left_x = float(event.x)
+        elif self.drag_mode == "right":
+            self.right_x = float(event.x)
+        elif self.drag_mode == "pair":
+            spacing = self.right_x - self.left_x
+            center = float(event.x)
+            self.left_x = center - spacing * 0.5
+            self.right_x = center + spacing * 0.5
+        self.clamp_guides()
+        self.draw_calibration()
+
+    def on_calibration_release(self, _event) -> None:
+        self.drag_mode = None
+
+    def nudge(self, dx: float, _dy: float, dspacing: float) -> None:
+        if self.monitor is None:
+            return
+        if dspacing:
+            self.left_x -= dspacing * 0.5
+            self.right_x += dspacing * 0.5
+        if dx:
+            self.left_x += dx
+            self.right_x += dx
+        self.clamp_guides()
+        self.draw_calibration()
+
+    def save(self) -> None:
+        if self.monitor is None:
+            return
+        spacing = max(self.right_x - self.left_x, 1.0)
+        profile = ScreenCalibrationProfile(
+            version=1,
+            created_unix=time.time(),
+            monitor_name=self.monitor.name,
+            monitor_x=self.monitor.x,
+            monitor_y=self.monitor.y,
+            width_px=self.monitor.width,
+            height_px=self.monitor.height,
+            marker_spacing_mm=TOBII_ET5_MARKER_SPACING_MM,
+            marker_spacing_px=spacing,
+            px_per_mm=spacing / TOBII_ET5_MARKER_SPACING_MM,
+            mm_per_px=TOBII_ET5_MARKER_SPACING_MM / spacing,
+            device_center_x_px=(self.left_x + self.right_x) * 0.5,
+            device_center_y_px=float(self.monitor.height),
+        )
+        save_screen_calibration(self.profile_file, profile)
+        self.on_saved(profile)
+        self.close()
 
 
 class OpenTrackUdpBridge:
@@ -787,6 +1172,8 @@ class MediaPipeFaceBridge:
                 tx=0.0,
                 ty=0.0,
                 tz=0.0,
+                face_width=0.0,
+                face_height=0.0,
                 landmarks=0,
                 latency_ms=float(result.get("latency_ms") or 0.0),
                 error=str(result.get("error") or "no face"),
@@ -796,6 +1183,14 @@ class MediaPipeFaceBridge:
         ty = float(translation[1]) if len(translation) > 1 else 0.0
         tz = float(translation[2]) if len(translation) > 2 else 0.0
         landmarks = result.get("landmarks")
+        face_width = 0.0
+        face_height = 0.0
+        if isinstance(landmarks, list) and landmarks:
+            xs = [float(item.get("x", 0.0)) for item in landmarks if isinstance(item, dict)]
+            ys = [float(item.get("y", 0.0)) for item in landmarks if isinstance(item, dict)]
+            if xs and ys:
+                face_width = max(xs) - min(xs)
+                face_height = max(ys) - min(ys)
         return MediaPipeFaceSample(
             frame=self.frames_sent,
             seen_monotonic=now,
@@ -806,6 +1201,8 @@ class MediaPipeFaceBridge:
             tx=tx,
             ty=ty,
             tz=tz,
+            face_width=face_width,
+            face_height=face_height,
             landmarks=len(landmarks) if isinstance(landmarks, list) else 0,
             latency_ms=float(result.get("latency_ms") or 0.0),
         )
@@ -957,6 +1354,12 @@ def repo_root() -> Path:
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def ellipsize(text: str, max_chars: int) -> str:
+    if max_chars <= 3 or len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
 
 
 def angle_delta_deg(value: float, neutral: float) -> float:
@@ -1215,8 +1618,7 @@ class EyePoseDashboard:
         self.root.bind("c", self.recenter)
         self.root.bind("<space>", self.space_action)
         self.root.bind("g", self.start_gaze_calibration)
-        self.root.bind("h", self.start_head_calibration)
-        self.root.bind("n", self.advance_head_calibration_manually)
+        self.root.bind("m", self.open_screen_calibration)
         self.root.bind("d", self.dump_pitch_debug)
         self.root.bind("r", self.reset_baseline)
         self.root.bind("s", self.toggle_smoothing)
@@ -1238,33 +1640,27 @@ class EyePoseDashboard:
         self.pose: EyePose | None = None
         self.pose_source = "none"
         self.confidence = PoseConfidence()
+        self.display_confidence = PoseConfidence()
+        self.display_confidence_initialized = False
         self.last_eye_pose_for_velocity: EyePose | None = None
         self.last_eye_pose_time = 0.0
         self.last_eye_velocity = 0.0
-        self.profile = self.load_head_calibration()
-        self.head_calibrating = False
-        self.head_cal_start = 0.0
-        self.head_cal_phase_index = 0
-        self.head_cal_phase_start = 0.0
-        self.head_cal_phase_match_count = 0
-        self.head_cal_phase_reference: tuple[float, float, float, float] | None = None
-        self.head_cal_phase_start_coverage: dict[str, int] = {key: 0 for key, _label in HEAD_CALIBRATION_BINS}
-        self.head_cal_samples: list[tuple[EyePose, PoseConfidence, str]] = []
-        self.manual_head_cal_window: Toplevel | None = None
-        self.manual_head_cal_status: StringVar | None = None
-        self.manual_head_cal_target: tuple[str, str] | None = None
-        self.manual_head_cal_axis = ""
-        self.manual_head_cal_index = 0
-        self.manual_head_cal_sequence: list[tuple[str, str]] = []
-        self.manual_head_cal_captures: dict[str, tuple[EyePose, PoseConfidence]] = {}
-        self.coverage: dict[str, int] = {key: 0 for key, _label in HEAD_CALIBRATION_BINS}
         self.gaze_trail: deque[tuple[float, float]] = deque(maxlen=45)
         self.smoothed_gaze_ratio: tuple[float, float] | None = None
-        self.gaze_affine: tuple[list[float], list[float]] | None = None
+        self.gaze_calibration_file: Path | None = getattr(args, "gaze_calibration_file", None)
+        self.gaze_affine: tuple[list[float], list[float]] | None = load_gaze_calibration(self.gaze_calibration_file)
         self.gaze_offset_x = 0.0
         self.gaze_offset_y = 0.0
         self.calibration_index: int | None = None
         self.calibration_points: list[tuple[float, float, float, float]] = []
+        self.screen_profile = load_screen_calibration(getattr(args, "screen_calibration_file", None))
+        self.screen_calibration_window: ScreenCalibrationWindow | None = None
+        self.first_run_active = bool(getattr(args, "first_run_calibration", True)) and not bool(getattr(args, "headless", False))
+        self.first_run_prompted = False
+        self.first_run_waiting_for_screen = False
+        self.gaze_calibration_fullscreen_active = False
+        self.gaze_calibration_previous_geometry = ""
+        self.gaze_calibration_previous_topmost = False
         self.harness_menu_open = False
         self.baseline: EyeBaseline | None = None
         self.smoothing_enabled = True
@@ -1274,9 +1670,13 @@ class EyePoseDashboard:
         self.last_sample_index = -1
         self.packet_times: deque[float] = deque(maxlen=120)
         self.opentrack_bridge = OpenTrackUdpBridge(self.active_udp_target(), args) if self.active_udp_target() else None
-        self.mediapipe_yaw_neutral: float | None = self.profile.face_yaw_neutral
-        self.mediapipe_pitch_neutral: float | None = self.profile.face_pitch_neutral
-        self.mediapipe_roll_neutral: float | None = self.profile.face_roll_neutral
+        self.mediapipe_yaw_neutral: float | None = None
+        self.mediapipe_pitch_neutral: float | None = None
+        self.mediapipe_roll_neutral: float | None = None
+        self.mediapipe_tx_neutral: float | None = None
+        self.mediapipe_ty_neutral: float | None = None
+        self.mediapipe_tz_neutral: float | None = None
+        self.mediapipe_face_size_neutral: float | None = None
         self.inband_dashboard_proc: subprocess.Popen | None = None
         self.face_handoff_yaw_bias = 0.0
         self.face_handoff_pitch_bias = 0.0
@@ -1298,6 +1698,7 @@ class EyePoseDashboard:
         self.status = "starting"
 
     def quit(self, _event=None) -> None:
+        self.restore_gaze_calibration_window()
         self.save_window_state()
         if self.proc.poll() is None:
             os.killpg(self.proc.pid, signal.SIGTERM)
@@ -1310,6 +1711,8 @@ class EyePoseDashboard:
         if self.hq_worker is not None:
             self.hq_worker.terminate()
         self.terminate_inband_dashboard()
+        if self.screen_calibration_window is not None:
+            self.screen_calibration_window.close()
         if self.opentrack_bridge is not None:
             self.opentrack_bridge.close()
         self.root.destroy()
@@ -1409,9 +1812,6 @@ class EyePoseDashboard:
         if self.calibration_index is not None:
             self.capture_calibration_point()
             return
-        if self.manual_head_cal_target is not None:
-            self.capture_manual_head_calibration()
-            return
         self.recenter()
         self.center_gaze()
 
@@ -1420,8 +1820,10 @@ class EyePoseDashboard:
         self.recent_valid.clear()
         self.clear_face_calibration()
         self.smoother.reset()
-        self.reset_gaze_calibration()
+        self.clear_gaze_runtime_state()
         self.confidence = PoseConfidence()
+        self.display_confidence = PoseConfidence()
+        self.display_confidence_initialized = False
         self.last_eye_pose_for_velocity = None
         self.reset_pitch_mapper()
         self.status = "collecting baseline"
@@ -1445,297 +1847,6 @@ class EyePoseDashboard:
         self.pitch_mapper_hold_until = 0.0
         self.pitch_debug_status = "reset"
 
-    def start_head_calibration(self, _event=None) -> None:
-        self.open_head_calibration_window()
-        return
-
-    def start_guided_head_calibration(self, _event=None) -> None:
-        if self.head_calibrating:
-            self.finish_head_calibration(force=True)
-            return
-        self.recenter()
-        if self.latest_mediapipe is None:
-            self.status = "head cal waiting for face"
-        self.head_calibrating = True
-        self.head_cal_start = time.monotonic()
-        self.head_cal_phase_index = 0
-        self.head_cal_phase_start = self.head_cal_start
-        self.head_cal_phase_match_count = 0
-        self.head_cal_phase_reference = None
-        self.head_cal_samples = []
-        self.coverage = {key: 0 for key, _label in HEAD_CALIBRATION_BINS}
-        self.head_cal_phase_start_coverage = self.coverage.copy()
-        self.status = "head cal: neutral"
-
-    def finish_head_calibration(self, force: bool = False) -> None:
-        good = list(self.head_cal_samples)
-        if len(good) < self.args.head_cal_min_samples:
-            if force:
-                self.head_calibrating = False
-            self.status = f"head cal needs samples {len(good)}/{self.args.head_cal_min_samples}"
-            return
-        if not force and self.head_cal_phase_index < len(HEAD_CALIBRATION_PHASES):
-            self.status = f"head cal {self.head_cal_progress():.0f}% {len(good)} samples"
-            return
-
-        yaw_phase_values = [(eye.yaw, phase_key) for eye, confidence, phase_key in good if confidence.eye >= self.args.head_cal_min_eye_confidence]
-        yaw_left_values = [value for value, phase_key in yaw_phase_values if phase_key == "yaw_left" and abs(value) > self.args.head_cal_axis_threshold_deg]
-        yaw_right_values = [value for value, phase_key in yaw_phase_values if phase_key == "yaw_right" and abs(value) > self.args.head_cal_axis_threshold_deg]
-        yaw_left = [abs(value) for value in yaw_left_values]
-        yaw_right = [abs(value) for value in yaw_right_values]
-        pitch_values = [(eye.pitch_proxy, phase_key) for eye, _confidence, phase_key in good]
-        pitch_up_values = [value for value, phase_key in pitch_values if phase_key == "pitch_up" and abs(value) > self.args.head_cal_axis_threshold_deg]
-        pitch_down_values = [value for value, phase_key in pitch_values if phase_key == "pitch_down" and abs(value) > self.args.head_cal_axis_threshold_deg]
-        pitch_up = [abs(value) for value in pitch_up_values]
-        pitch_down = [abs(value) for value in pitch_down_values]
-
-        def side_scale(values: list[float], reference: float = 8.0) -> float:
-            if not values:
-                return 1.0
-            med = median(values)
-            if med < 1.0:
-                return 1.0
-            return clamp(reference / med, 0.5, 2.0)
-
-        self.profile = HeadCalibrationProfile(
-            yaw_left_scale=side_scale(yaw_left),
-            yaw_right_scale=side_scale(yaw_right),
-            yaw_left_sign=1.0 if not yaw_left_values or median(yaw_left_values) >= 0.0 else -1.0,
-            yaw_right_sign=1.0 if not yaw_right_values or median(yaw_right_values) >= 0.0 else -1.0,
-            pitch_up_scale=side_scale(pitch_up, 4.0),
-            pitch_down_scale=side_scale(pitch_down, 4.0),
-            pitch_up_sign=1.0 if not pitch_up_values or median(pitch_up_values) >= 0.0 else -1.0,
-            pitch_down_sign=1.0 if not pitch_down_values or median(pitch_down_values) >= 0.0 else -1.0,
-            face_yaw_neutral=self.mediapipe_yaw_neutral,
-            face_pitch_neutral=self.mediapipe_pitch_neutral,
-            face_roll_neutral=self.mediapipe_roll_neutral,
-            created=time.time(),
-        )
-        self.save_head_calibration()
-        self.head_calibrating = False
-        self.status = f"head calibrated {len(good)} samples"
-
-    def reset_head_calibration(self, _px: float | None = None, _py: float | None = None) -> None:
-        self.profile = HeadCalibrationProfile()
-        self.clear_face_calibration()
-        self.capture_face_neutral()
-        self.save_head_calibration()
-        self.pitch_up_hold = None
-        self.reset_pitch_mapper()
-        self.manual_head_cal_captures.clear()
-        self.manual_head_cal_target = None
-        self.manual_head_cal_axis = ""
-        self.manual_head_cal_sequence = []
-        self.manual_head_cal_index = 0
-        self.status = "head calibration reset"
-        self.update_manual_head_cal_status("Head calibration reset. Capture neutral, then an axis.")
-
-    def open_head_calibration_window(self, _event=None) -> None:
-        if self.manual_head_cal_window is not None and self.manual_head_cal_window.winfo_exists():
-            self.manual_head_cal_window.lift()
-            return
-        window = Toplevel(self.root)
-        window.title("Tobii Head Calibration")
-        window.configure(bg=PANEL)
-        window.geometry("520x320")
-        self.manual_head_cal_window = window
-        self.manual_head_cal_status = StringVar(value="Capture neutral first, then choose yaw, pitch, or roll.")
-
-        outer = Frame(window, bg=PANEL, padx=18, pady=18)
-        outer.pack(fill=BOTH, expand=True)
-        Label(outer, text="Head Calibration", bg=PANEL, fg=TEXT, font=("Sans", 18, "bold")).pack(anchor="w")
-        Label(
-            outer,
-            textvariable=self.manual_head_cal_status,
-            bg=PANEL,
-            fg=YELLOW,
-            font=("Sans", 11, "bold"),
-            wraplength=470,
-            justify="left",
-        ).pack(anchor="w", pady=(8, 16))
-
-        button_row = Frame(outer, bg=PANEL)
-        button_row.pack(anchor="w", pady=(0, 12))
-        Button(button_row, text="Capture Neutral", command=self.start_manual_head_cal_neutral, width=16).pack(side="left", padx=(0, 8))
-        Button(button_row, text="Yaw", command=lambda: self.start_manual_head_cal_axis("yaw"), width=10).pack(side="left", padx=(0, 8))
-        Button(button_row, text="Pitch", command=lambda: self.start_manual_head_cal_axis("pitch"), width=10).pack(side="left", padx=(0, 8))
-        Button(button_row, text="Roll", command=lambda: self.start_manual_head_cal_axis("roll"), width=10).pack(side="left")
-
-        action_row = Frame(outer, bg=PANEL)
-        action_row.pack(anchor="w", pady=(10, 12))
-        Button(action_row, text="Save Profile", command=self.save_manual_head_calibration_profile, width=14).pack(side="left", padx=(0, 8))
-        Button(action_row, text="Reset Head", command=self.reset_head_calibration, width=14).pack(side="left", padx=(0, 8))
-        Button(action_row, text="Close", command=window.destroy, width=10).pack(side="left")
-
-        Label(
-            outer,
-            text="Workflow: choose an axis, hold the requested pose, press Space to capture, then follow the next prompt. Use Save Profile after capturing the axes you want.",
-            bg=PANEL,
-            fg=MUTED,
-            font=("Sans", 10),
-            wraplength=470,
-            justify="left",
-        ).pack(anchor="w", pady=(12, 0))
-        window.bind("<space>", self.capture_manual_head_calibration)
-        window.protocol("WM_DELETE_WINDOW", window.destroy)
-
-    def start_manual_head_cal_neutral(self) -> None:
-        self.manual_head_cal_axis = "neutral"
-        self.manual_head_cal_sequence = [("neutral", "Sit naturally, face center, and press Space.")]
-        self.manual_head_cal_index = 0
-        self.manual_head_cal_target = self.manual_head_cal_sequence[0]
-        self.update_manual_head_cal_status(self.manual_head_cal_target[1])
-
-    def start_manual_head_cal_axis(self, axis: str) -> None:
-        sequences = {
-            "yaw": [
-                ("yaw_left", "Turn your head left, hold that position, then press Space."),
-                ("yaw_right", "Turn your head right, hold that position, then press Space."),
-            ],
-            "pitch": [
-                ("pitch_up_mid", "Tilt your head halfway up, hold that position, then press Space."),
-                ("pitch_up_max", "Tilt your head to your highest comfortable up angle, hold, then press Space."),
-                ("pitch_down", "Tilt your head down, hold that position, then press Space."),
-            ],
-            "roll": [
-                ("roll_left", "Tilt your head toward your left shoulder, hold, then press Space."),
-                ("roll_right", "Tilt your head toward your right shoulder, hold, then press Space."),
-            ],
-        }
-        self.manual_head_cal_axis = axis
-        self.manual_head_cal_sequence = sequences[axis]
-        self.manual_head_cal_index = 0
-        self.manual_head_cal_target = self.manual_head_cal_sequence[0]
-        self.update_manual_head_cal_status(self.manual_head_cal_target[1])
-
-    def capture_manual_head_calibration(self, _event=None) -> None:
-        if self.manual_head_cal_target is None:
-            return
-        if self.pose is None:
-            self.update_manual_head_cal_status("No live pose yet. Wait for tracking, then press Space again.")
-            return
-        key, _instruction = self.manual_head_cal_target
-        self.manual_head_cal_captures[key] = (self.pose, self.confidence)
-        if key == "neutral":
-            self.capture_mediapipe_neutral()
-            self.update_manual_head_cal_status("Neutral captured. Choose yaw, pitch, or roll.")
-            self.manual_head_cal_target = None
-            return
-
-        self.manual_head_cal_index += 1
-        if self.manual_head_cal_index >= len(self.manual_head_cal_sequence):
-            axis = self.manual_head_cal_axis
-            self.manual_head_cal_target = None
-            self.save_manual_head_calibration_profile()
-            self.update_manual_head_cal_status(f"{axis.title()} captured and profile saved. Capture another axis or close.")
-            return
-        self.manual_head_cal_target = self.manual_head_cal_sequence[self.manual_head_cal_index]
-        self.update_manual_head_cal_status(f"Captured {key}. {self.manual_head_cal_target[1]}")
-
-    def update_manual_head_cal_status(self, message: str) -> None:
-        if self.manual_head_cal_status is not None:
-            captured = ", ".join(sorted(self.manual_head_cal_captures)) or "none"
-            self.manual_head_cal_status.set(f"{message}\nCaptured: {captured}")
-
-    def save_manual_head_calibration_profile(self) -> None:
-        neutral = self.manual_head_cal_captures.get("neutral")
-        if neutral is None:
-            self.update_manual_head_cal_status("Capture neutral before saving a head profile.")
-            return
-        neutral_pose, _neutral_conf = neutral
-        yaw_neutral = neutral_pose.yaw
-        pitch_neutral = neutral_pose.pitch_proxy
-
-        def sign(value: float, default: float) -> float:
-            return default if abs(value) < 1e-6 else (1.0 if value >= 0.0 else -1.0)
-
-        def scale(value: float, reference: float) -> float:
-            if abs(value) < 0.5:
-                return 1.0
-            return clamp(reference / abs(value), 0.35, 3.0)
-
-        def yaw_value(key: str) -> float | None:
-            capture = self.manual_head_cal_captures.get(key)
-            if capture is None:
-                return None
-            pose, _confidence = capture
-            return pose.yaw - yaw_neutral
-
-        def pitch_value(key: str) -> float | None:
-            capture = self.manual_head_cal_captures.get(key)
-            if capture is None:
-                return None
-            pose, _confidence = capture
-            return pose.pitch_proxy - pitch_neutral
-
-        def pitch_target_value(key: str) -> float | None:
-            capture = self.manual_head_cal_captures.get(key)
-            if capture is None:
-                return None
-            pose, _confidence = capture
-            return pose.pitch_proxy - neutral_pose.pitch_proxy
-
-        def roll_value(key: str) -> float | None:
-            capture = self.manual_head_cal_captures.get(key)
-            if capture is None:
-                return None
-            pose, _confidence = capture
-            return pose.roll - neutral_pose.roll
-
-        yaw_left = yaw_value("yaw_left")
-        yaw_right = yaw_value("yaw_right")
-        pitch_up_mid = pitch_value("pitch_up_mid")
-        pitch_up_max = pitch_value("pitch_up_max")
-        pitch_down = pitch_value("pitch_down")
-        pitch_up_mid_target = pitch_target_value("pitch_up_mid")
-        pitch_up_max_target = pitch_target_value("pitch_up_max")
-        pitch_down_target = pitch_target_value("pitch_down")
-        roll_left = roll_value("roll_left")
-        roll_right = roll_value("roll_right")
-
-        pitch_up_for_scale = pitch_up_max if pitch_up_max is not None else pitch_up_mid
-        if pitch_up_mid is not None and pitch_up_mid_target is None:
-            pitch_up_mid_target = pitch_up_mid
-        if pitch_up_max is not None and pitch_up_max_target is None:
-            pitch_up_max_target = pitch_up_max
-        if pitch_down is not None and pitch_down_target is None:
-            pitch_down_target = pitch_down
-        if pitch_up_mid is not None and pitch_up_max is not None and pitch_up_mid_target is not None and pitch_up_max_target is not None:
-            up_sign = sign(pitch_up_max if abs(pitch_up_max) >= abs(pitch_up_mid) else pitch_up_mid, self.profile.pitch_up_sign)
-            if up_sign * pitch_up_max < up_sign * pitch_up_mid:
-                pitch_up_mid, pitch_up_max = pitch_up_max, pitch_up_mid
-                pitch_up_mid_target, pitch_up_max_target = pitch_up_max_target, pitch_up_mid_target
-            if up_sign * pitch_up_max_target <= up_sign * pitch_up_mid_target:
-                pitch_up_max_target = pitch_up_mid_target + up_sign * max(4.0, abs(pitch_up_mid_target) * 0.65)
-
-        self.profile = HeadCalibrationProfile(
-            yaw_left_scale=scale(yaw_left, 8.0) if yaw_left is not None else self.profile.yaw_left_scale,
-            yaw_right_scale=scale(yaw_right, 8.0) if yaw_right is not None else self.profile.yaw_right_scale,
-            yaw_left_sign=sign(yaw_left, self.profile.yaw_left_sign) if yaw_left is not None else self.profile.yaw_left_sign,
-            yaw_right_sign=sign(yaw_right, self.profile.yaw_right_sign) if yaw_right is not None else self.profile.yaw_right_sign,
-            pitch_up_scale=scale(pitch_up_for_scale, 4.0) if pitch_up_for_scale is not None else self.profile.pitch_up_scale,
-            pitch_down_scale=scale(pitch_down, 4.0) if pitch_down is not None else self.profile.pitch_down_scale,
-            pitch_up_sign=sign(pitch_up_for_scale, self.profile.pitch_up_sign) if pitch_up_for_scale is not None else self.profile.pitch_up_sign,
-            pitch_down_sign=sign(pitch_down, self.profile.pitch_down_sign) if pitch_down is not None else self.profile.pitch_down_sign,
-            roll_left_scale=scale(roll_left, 8.0) if roll_left is not None else self.profile.roll_left_scale,
-            roll_right_scale=scale(roll_right, 8.0) if roll_right is not None else self.profile.roll_right_scale,
-            roll_left_sign=sign(roll_left, self.profile.roll_left_sign) if roll_left is not None else self.profile.roll_left_sign,
-            roll_right_sign=sign(roll_right, self.profile.roll_right_sign) if roll_right is not None else self.profile.roll_right_sign,
-            face_yaw_neutral=self.mediapipe_yaw_neutral,
-            face_pitch_neutral=self.mediapipe_pitch_neutral,
-            face_roll_neutral=self.mediapipe_roll_neutral,
-            pitch_up_mid_raw=pitch_up_mid,
-            pitch_up_mid_value=pitch_up_mid_target,
-            pitch_up_max_raw=pitch_up_max,
-            pitch_up_max_value=pitch_up_max_target,
-            pitch_down_raw=pitch_down,
-            pitch_down_value=pitch_down_target,
-            created=time.time(),
-        )
-        self.reset_pitch_mapper()
-        self.save_head_calibration()
-        self.status = "manual head calibration saved"
-
     def reset_tuning(self, _px: float | None = None, _py: float | None = None) -> None:
         for attr, value in DEFAULT_TUNING_VALUES.items():
             setattr(self.args, attr, value)
@@ -1755,6 +1866,10 @@ class EyePoseDashboard:
         sample = self.latest
         if sample is None or sample.gaze_valid != 1 or not math.isfinite(sample.gaze_x) or not math.isfinite(sample.gaze_y):
             return
+        if self.gaze_affine is not None:
+            self.smoothed_gaze_ratio = None
+            self.gaze_trail.clear()
+            return
         self.gaze_affine = None
         self.gaze_offset_x = 0.5 - sample.gaze_x
         self.gaze_offset_y = 0.5 - sample.gaze_y
@@ -1763,15 +1878,45 @@ class EyePoseDashboard:
         self.status = "gaze centered"
 
     def reset_gaze_calibration(self, _event=None) -> None:
-        self.gaze_affine = None
-        self.gaze_offset_x = 0.0
-        self.gaze_offset_y = 0.0
+        self.clear_gaze_calibration(delete_saved=True)
+
+    def clear_gaze_runtime_state(self) -> None:
         self.smoothed_gaze_ratio = None
         self.gaze_trail.clear()
         self.calibration_index = None
         self.calibration_points = []
+        self.restore_gaze_calibration_window()
+
+    def clear_gaze_calibration(self, delete_saved: bool) -> None:
+        self.gaze_affine = None
+        self.gaze_offset_x = 0.0
+        self.gaze_offset_y = 0.0
+        self.clear_gaze_runtime_state()
+        if delete_saved:
+            delete_file_quietly(self.gaze_calibration_file)
+
+    def open_screen_calibration(self, _event=None) -> None:
+        if self.screen_calibration_window is not None and self.screen_calibration_window.window is not None:
+            self.status = "screen calibration already open"
+            return
+        self.screen_calibration_window = ScreenCalibrationWindow(
+            self.root,
+            getattr(self.args, "screen_calibration_file", None),
+            self.screen_profile,
+            self.on_screen_calibration_saved,
+        )
+        self.status = "screen calibration"
+
+    def on_screen_calibration_saved(self, profile: ScreenCalibrationProfile) -> None:
+        self.screen_profile = profile
+        self.status = "screen calibrated"
+        if self.first_run_waiting_for_screen:
+            self.first_run_waiting_for_screen = False
+            if self.gaze_affine is None:
+                self.root.after(350, self.start_gaze_calibration)
 
     def start_gaze_calibration(self, _event=None) -> None:
+        self.enter_gaze_calibration_window()
         self.calibration_index = 0
         self.calibration_points = []
         self.smoothed_gaze_ratio = None
@@ -1805,13 +1950,41 @@ class EyePoseDashboard:
         self.calibration_index = None
         if affine is None:
             self.status = "gaze calibration failed"
+            self.restore_gaze_calibration_window()
             return
         self.gaze_affine = affine
         self.gaze_offset_x = 0.0
         self.gaze_offset_y = 0.0
         self.smoothed_gaze_ratio = None
         self.gaze_trail.clear()
+        save_gaze_calibration(self.gaze_calibration_file, affine)
         self.status = "gaze calibrated"
+        self.restore_gaze_calibration_window()
+
+    def enter_gaze_calibration_window(self) -> None:
+        if self.args.headless or self.args.fullscreen or self.gaze_calibration_fullscreen_active:
+            return
+        try:
+            self.root.update_idletasks()
+            self.gaze_calibration_previous_geometry = self.root.geometry()
+            self.gaze_calibration_previous_topmost = bool(self.root.attributes("-topmost"))
+            self.root.attributes("-fullscreen", True)
+            self.root.attributes("-topmost", True)
+            self.gaze_calibration_fullscreen_active = True
+        except Exception:
+            self.gaze_calibration_fullscreen_active = False
+
+    def restore_gaze_calibration_window(self) -> None:
+        if not self.gaze_calibration_fullscreen_active:
+            return
+        try:
+            self.root.attributes("-fullscreen", False)
+            self.root.attributes("-topmost", self.gaze_calibration_previous_topmost)
+            if self.gaze_calibration_previous_geometry:
+                self.root.geometry(self.gaze_calibration_previous_geometry)
+        except Exception:
+            pass
+        self.gaze_calibration_fullscreen_active = False
 
     def gaze_ratio(self, sample: EyeSample) -> tuple[float, float]:
         if self.gaze_affine is not None:
@@ -1864,7 +2037,21 @@ class EyePoseDashboard:
         self.save_tuning()
 
     def start_loop(self) -> None:
+        self.maybe_start_first_run_calibration()
         self.tick()
+
+    def maybe_start_first_run_calibration(self) -> None:
+        if not self.first_run_active or self.first_run_prompted:
+            return
+        self.first_run_prompted = True
+        if self.screen_profile is None:
+            self.first_run_waiting_for_screen = True
+            self.status = "first run: screen calibration"
+            self.open_screen_calibration()
+            return
+        if self.gaze_affine is None:
+            self.status = "first run: gaze calibration"
+            self.root.after(350, self.start_gaze_calibration)
 
     def restart_sampler(self, reason: str, now: float) -> bool:
         if now - self.last_sampler_restart_monotonic < 2.0:
@@ -1925,7 +2112,6 @@ class EyePoseDashboard:
                     fused_pose, fused_source = self.fused_pose(self.raw_pose, self.confidence, now)
                     self.pose = self.smooth_runtime_pose(fused_pose, fused_source) if self.smoothing_enabled else fused_pose
                     self.pose_source = fused_source
-                    self.collect_head_calibration(self.pose, self.confidence)
                     self.last_pose_monotonic = now
                     self.pose_trail.append((self.pose.yaw, self.pose.pitch_proxy))
                     saw_valid_eye_pose = True
@@ -2081,11 +2267,8 @@ class EyePoseDashboard:
         return clamp(sample.confidence * max(age_score, 0.35), 0.0, 1.0)
 
     def fused_pose(self, eye_pose: EyePose, confidence: PoseConfidence, now: float) -> tuple[EyePose, str]:
-        eye_pose = scaled_pose(eye_pose, self.profile)
         face_primary = self.args.tobii_head_pose_source == "face"
         face_pose = self.face_fallback_pose(use_handoff=not face_primary)
-        if face_pose is not None:
-            face_pose = scaled_pose(face_pose, HeadCalibrationProfile(), scale_pitch=False)
         face_conf = self.face_confidence(now)
         confidence.face = face_conf
         if face_pose is None or face_conf <= 0.0 or self.args.tobii_head_pose_source == "eye":
@@ -2173,7 +2356,6 @@ class EyePoseDashboard:
         fallback = self.face_fallback_pose(use_handoff=not face_primary)
         if fallback is None:
             return False
-        fallback = scaled_pose(fallback, HeadCalibrationProfile(), scale_pitch=False)
         if not face_primary and self.pose is not None and self.pose.pitch_proxy >= self.args.eye_pitch_up_edge_deg:
             allowed_drop = max(self.args.pitch_snapback_guard_deg, 0.01)
             guarded_pitch = max(fallback.pitch_proxy, self.pose.pitch_proxy - allowed_drop)
@@ -2215,6 +2397,10 @@ class EyePoseDashboard:
         self.mediapipe_yaw_neutral = None
         self.mediapipe_pitch_neutral = None
         self.mediapipe_roll_neutral = None
+        self.mediapipe_tx_neutral = None
+        self.mediapipe_ty_neutral = None
+        self.mediapipe_tz_neutral = None
+        self.mediapipe_face_size_neutral = None
         self.face_handoff_yaw_bias = 0.0
         self.face_handoff_pitch_bias = 0.0
         self.face_handoff_active = False
@@ -2231,6 +2417,10 @@ class EyePoseDashboard:
         self.mediapipe_yaw_neutral = sample.yaw
         self.mediapipe_pitch_neutral = sample.pitch
         self.mediapipe_roll_neutral = sample.roll
+        self.mediapipe_tx_neutral = sample.tx
+        self.mediapipe_ty_neutral = sample.ty
+        self.mediapipe_tz_neutral = sample.tz
+        self.mediapipe_face_size_neutral = math.sqrt(max(sample.face_width * sample.face_height, 0.0))
 
     def mediapipe_sample_usable(self, sample: MediaPipeFaceSample) -> bool:
         return sample.usable and sample.confidence >= self.args.mediapipe_min_face_confidence
@@ -2280,6 +2470,50 @@ class EyePoseDashboard:
             return None
         return angle_delta_deg(self.latest_mediapipe.roll, self.mediapipe_roll_neutral) * self.args.mediapipe_roll_sign
 
+    def corrected_mediapipe_translation(self) -> tuple[float, float, float] | None:
+        if not self.latest_mediapipe_usable() or self.latest_mediapipe is None:
+            return None
+        if (
+            self.mediapipe_tx_neutral is None
+            or self.mediapipe_ty_neutral is None
+            or self.mediapipe_tz_neutral is None
+            or self.mediapipe_face_size_neutral is None
+        ):
+            self.capture_mediapipe_neutral()
+        if (
+            self.mediapipe_tx_neutral is None
+            or self.mediapipe_ty_neutral is None
+            or self.mediapipe_tz_neutral is None
+        ):
+            return None
+        sample = self.latest_mediapipe
+        scale = self.args.mediapipe_translation_output_scale
+        matrix_z = (sample.tz - self.mediapipe_tz_neutral) * scale
+        face_size = math.sqrt(max(sample.face_width * sample.face_height, 0.0))
+        depth_z = matrix_z
+        if self.mediapipe_face_size_neutral and self.mediapipe_face_size_neutral > 1.0 and face_size > 1.0:
+            depth_ratio = (face_size / self.mediapipe_face_size_neutral) - 1.0
+            depth_z = depth_ratio * self.args.mediapipe_depth_output_scale
+        return (
+            (sample.tx - self.mediapipe_tx_neutral) * scale,
+            (sample.ty - self.mediapipe_ty_neutral) * scale,
+            depth_z,
+        )
+
+    def eye_origin_translation(self) -> tuple[float, float, float] | None:
+        if self.raw_pose is None:
+            return None
+        max_age = max(self.args.blink_hold_s, self.args.eye_fallback_after_s, self.args.mediapipe_max_age_s)
+        if self.last_eye_pose_time <= 0.0 or time.monotonic() - self.last_eye_pose_time > max_age:
+            return None
+        if self.confidence.eye_distance_stable <= 0.25:
+            return None
+        tz = self.raw_pose.tz
+        face_translation = self.corrected_mediapipe_translation()
+        if abs(tz) < self.args.eye_origin_z_deadband_mm and face_translation is not None:
+            tz = face_translation[2]
+        return (self.raw_pose.tx, self.raw_pose.ty, tz)
+
     def mediapipe_fallback_pose(self, use_handoff: bool = True) -> EyePose | None:
         corrected_yaw = self.corrected_mediapipe_yaw()
         corrected_pitch = self.corrected_mediapipe_pitch()
@@ -2299,171 +2533,20 @@ class EyePoseDashboard:
             corrected_yaw += self.face_handoff_yaw_bias
         if use_handoff and corrected_pitch is not None:
             corrected_pitch += self.face_handoff_pitch_bias
+        translation = self.eye_origin_translation()
+        if translation is None:
+            translation = self.corrected_mediapipe_translation()
+        tx, ty, tz = translation if translation is not None else (base.tx, base.ty, base.tz)
         return EyePose(
             yaw=corrected_yaw if corrected_yaw is not None else base.yaw,
             pitch_proxy=corrected_pitch if corrected_pitch is not None else base.pitch_proxy,
             roll=corrected_roll if corrected_roll is not None else base.roll,
-            tx=base.tx,
-            ty=base.ty,
-            tz=base.tz,
+            tx=tx,
+            ty=ty,
+            tz=tz,
             eye_distance=base.eye_distance,
             eye_distance_delta=base.eye_distance_delta,
         )
-
-    def collect_head_calibration(self, eye_pose: EyePose, confidence: PoseConfidence) -> None:
-        if not self.head_calibrating:
-            return
-        now = time.monotonic()
-        phase = self.current_head_calibration_phase()
-        phase_key = phase[0] if phase is not None else "complete"
-        self.head_cal_samples.append((eye_pose, confidence, phase_key))
-        self.update_coverage(eye_pose)
-        if phase is not None and self.head_cal_sample_matches_phase(phase_key, eye_pose):
-            self.head_cal_phase_match_count += 1
-        self.advance_head_calibration_phase(now)
-
-    def current_head_calibration_phase(self) -> tuple[str, str, tuple[str, ...]] | None:
-        if self.head_cal_phase_index >= len(HEAD_CALIBRATION_PHASES):
-            return None
-        return HEAD_CALIBRATION_PHASES[self.head_cal_phase_index]
-
-    def advance_head_calibration_phase(self, now: float | None = None) -> None:
-        now = time.monotonic() if now is None else now
-        phase = self.current_head_calibration_phase()
-        if phase is None:
-            self.finish_head_calibration()
-            return
-        key, _instruction, required_bins = phase
-        enough_time = now - self.head_cal_phase_start >= self.args.head_cal_phase_min_duration_s
-        enough_samples = self.head_cal_phase_match_count >= self.args.head_cal_phase_samples
-        if not (enough_time and enough_samples):
-            self.status = f"head cal {key} {self.head_cal_phase_progress():.0f}%"
-            return
-        self.head_cal_phase_index += 1
-        self.head_cal_phase_start = now
-        self.head_cal_phase_match_count = 0
-        self.head_cal_phase_reference = None
-        self.head_cal_phase_start_coverage = self.coverage.copy()
-        if self.current_head_calibration_phase() is None:
-            self.finish_head_calibration()
-            return
-        self.status = f"head cal: {self.current_head_calibration_phase()[0]}"
-
-    def advance_head_calibration_manually(self, _event=None) -> None:
-        if not self.head_calibrating:
-            return
-        self.head_cal_phase_index += 1
-        self.head_cal_phase_start = time.monotonic()
-        self.head_cal_phase_match_count = 0
-        self.head_cal_phase_reference = None
-        self.head_cal_phase_start_coverage = self.coverage.copy()
-        phase = self.current_head_calibration_phase()
-        if phase is None:
-            self.finish_head_calibration(force=True)
-            return
-        self.status = f"head cal: {phase[0]}"
-
-    def head_cal_sample_matches_phase(self, phase_key: str, pose: EyePose) -> bool:
-        yaw, pitch, roll, distance = self.head_cal_phase_values(pose)
-        if phase_key != "neutral" and self.head_cal_phase_reference is None:
-            self.head_cal_phase_reference = (yaw, pitch, roll, distance)
-            return False
-        bins = set(key for key in self.coverage_bins_for_sample(pose) if key is not None)
-        if phase_key == "neutral":
-            return {"yaw_center", "pitch_center", "roll_center"}.issubset(bins)
-        ref_yaw, ref_pitch, ref_roll, ref_distance = self.head_cal_phase_reference or (yaw, pitch, roll, distance)
-        if phase_key in ("yaw_left", "yaw_right"):
-            return abs(yaw - ref_yaw) >= self.args.head_cal_yaw_threshold_deg
-        if phase_key in ("pitch_up", "pitch_down"):
-            return abs(pitch - ref_pitch) >= self.args.head_cal_pitch_threshold_deg
-        if phase_key == "roll_left":
-            return abs(roll - ref_roll) >= self.args.head_cal_roll_threshold_deg
-        if phase_key == "roll_right":
-            return abs(roll - ref_roll) >= self.args.head_cal_roll_threshold_deg
-        return phase_key in bins
-
-    def head_cal_phase_values(self, pose: EyePose) -> tuple[float, float, float, float]:
-        return pose.yaw, pose.pitch_proxy, pose.roll, pose.tz
-
-    def coverage_bins_for_sample(self, pose: EyePose) -> tuple[str, str, str, str | None]:
-        threshold = self.args.head_cal_axis_threshold_deg
-        if pose.yaw < -threshold:
-            yaw_bin = "yaw_left"
-        elif pose.yaw > threshold:
-            yaw_bin = "yaw_right"
-        else:
-            yaw_bin = "yaw_center"
-        if pose.pitch_proxy < -threshold:
-            pitch_bin = "pitch_down"
-        elif pose.pitch_proxy > threshold:
-            pitch_bin = "pitch_up"
-        else:
-            pitch_bin = "pitch_center"
-        if pose.roll < -threshold:
-            roll_bin = "roll_left"
-        elif pose.roll > threshold:
-            roll_bin = "roll_right"
-        else:
-            roll_bin = "roll_center"
-        distance_bin = None
-        if pose.tz < -self.args.head_cal_translation_threshold_mm:
-            distance_bin = "near"
-        elif pose.tz > self.args.head_cal_translation_threshold_mm:
-            distance_bin = "far"
-        return yaw_bin, pitch_bin, roll_bin, distance_bin
-
-    def update_coverage(self, pose: EyePose) -> None:
-        for key in self.coverage_bins_for_sample(pose):
-            if key is not None:
-                self.coverage[key] += 1
-
-    def head_cal_progress(self) -> float:
-        target = max(self.args.head_cal_phase_samples, 1)
-        filled = sum(clamp(count / target, 0.0, 1.0) for count in self.coverage.values())
-        return 100.0 * filled / len(self.coverage)
-
-    def head_cal_phase_progress(self) -> float:
-        phase = self.current_head_calibration_phase()
-        if phase is None:
-            return 100.0
-        target = max(self.args.head_cal_phase_samples, 1)
-        return 100.0 * clamp(self.head_cal_phase_match_count / target, 0.0, 1.0)
-
-    def head_cal_coverage_complete(self) -> bool:
-        target = max(self.args.head_cal_phase_samples, 1)
-        required = {bin_key for _key, _instruction, bins in HEAD_CALIBRATION_PHASES for bin_key in bins}
-        return all(self.coverage.get(key, 0) >= target for key in required)
-
-    def head_cal_instruction(self) -> str:
-        if not self.head_calibrating:
-            return "Press Head Cal for guided calibration. Follow each prompt until it advances."
-        phase = self.current_head_calibration_phase()
-        if phase is None:
-            return "Calibration complete. Saving profile."
-        index = self.head_cal_phase_index + 1
-        total = len(HEAD_CALIBRATION_PHASES)
-        key, instruction, required_bins = phase
-        target = max(self.args.head_cal_phase_samples, 1)
-        counts = f"{min(self.head_cal_phase_match_count, target)}/{target}"
-        delta_text = self.head_cal_delta_text()
-        threshold_text = self.head_cal_threshold_text(key)
-        return f"Step {index}/{total}: {instruction}  Current step {counts}{delta_text}{threshold_text}. Press N for next step."
-
-    def head_cal_delta_text(self) -> str:
-        if self.head_cal_phase_reference is None or self.pose is None:
-            return ""
-        yaw, pitch, roll, distance = self.head_cal_phase_values(self.pose)
-        ref_yaw, ref_pitch, ref_roll, ref_distance = self.head_cal_phase_reference
-        return f"  dY {yaw - ref_yaw:+.1f} dP {pitch - ref_pitch:+.1f} dR {roll - ref_roll:+.1f}"
-
-    def head_cal_threshold_text(self, phase_key: str) -> str:
-        if phase_key in ("yaw_left", "yaw_right"):
-            return f" need |dY|>{self.args.head_cal_yaw_threshold_deg:.1f}"
-        if phase_key in ("pitch_up", "pitch_down"):
-            return f" need |dP|>{self.args.head_cal_pitch_threshold_deg:.1f}"
-        if phase_key in ("roll_left", "roll_right"):
-            return f" need |dR|>{self.args.head_cal_roll_threshold_deg:.1f}"
-        return ""
 
     def sample_rate(self) -> float:
         if len(self.packet_times) < 2:
@@ -2477,14 +2560,15 @@ class EyePoseDashboard:
         self.click_targets.clear()
         w = max(self.canvas.winfo_width(), 1)
         h = max(self.canvas.winfo_height(), 1)
+        if self.calibration_index is not None:
+            self.draw_calibration_overlay(w, h)
+            return
         self.draw_grid(w, h)
 
         left_w = min(520, max(420, int(w * 0.30)))
         self.canvas.create_rectangle(0, 0, left_w, h, fill=PANEL, outline=STROKE)
         self.draw_sidebar(28, 28, left_w - 56)
         self.draw_pose_area(left_w + 28, 28, w - left_w - 56, h - 56)
-        if self.calibration_index is not None:
-            self.draw_calibration_overlay(w, h)
 
     def draw_grid(self, w: int, h: int) -> None:
         for ratio in (0.25, 0.5, 0.75):
@@ -2494,6 +2578,7 @@ class EyePoseDashboard:
             self.canvas.create_line(0, y, w, y, fill="#101820")
 
     def draw_sidebar(self, x: int, y: int, w: int) -> None:
+        original_y = y
         self.canvas.create_text(x, y, anchor="nw", fill=TEXT, font=("Sans", 24, "bold"), text="Tobii Eye Pose")
         self.canvas.create_text(x, y + 38, anchor="nw", fill=MUTED, font=("Sans", 12), text="blended eye + face pose for Star Citizen")
         y += 78
@@ -2567,22 +2652,23 @@ class EyePoseDashboard:
             y += 12
 
         footer_y = self.canvas.winfo_height() - 48
-        self.canvas.create_text(
-            x,
-            footer_y,
-            anchor="sw",
-            fill="#6b7788",
-            font=("Sans", 9),
-            text="Space recenter/capture  g gaze cal  h head cal  n next phase  r reset",
-        )
-        self.canvas.create_text(
-            x,
-            footer_y + 18,
-            anchor="sw",
-            fill="#6b7788",
-            font=("Sans", 9),
-            text="Tab harness  s smoothing  d pitch dump  Esc/q quit",
-        )
+        if y <= footer_y - 34:
+            self.canvas.create_text(
+                x,
+                footer_y,
+                anchor="sw",
+                fill="#6b7788",
+                font=("Sans", 9),
+                text="Space recenter  g gaze cal  m screen cal  r reset",
+            )
+            self.canvas.create_text(
+                x,
+                footer_y + 18,
+                anchor="sw",
+                fill="#6b7788",
+                font=("Sans", 9),
+                text="Tab harness  s smoothing  d pitch dump  Esc/q quit",
+            )
 
     def draw_pose_area(self, x: int, y: int, w: int, h: int) -> None:
         self.canvas.create_rectangle(x, y, x + w, y + h, fill="#090d12", outline=STROKE)
@@ -2597,26 +2683,6 @@ class EyePoseDashboard:
             text=f"{self.face_tracker_label()} primary with Tobii eye-origin anchor    source: {self.pose_source}",
         )
         header_h = 88
-        if self.head_calibrating:
-            banner_y = y + pad + 56
-            self.canvas.create_rectangle(
-                x + pad,
-                banner_y - 6,
-                x + w - pad,
-                banner_y + 44,
-                fill="#121922",
-                outline=STROKE,
-            )
-            self.canvas.create_text(
-                x + pad + 12,
-                banner_y,
-                anchor="nw",
-                fill=YELLOW,
-                font=("Sans", 10, "bold"),
-                text=self.head_cal_instruction(),
-                width=w - pad * 2 - 24,
-            )
-            header_h = 124
 
         plot_y = y + header_h
         plot_h = min(260, max(180, (h - header_h - 40) / 3))
@@ -2701,8 +2767,10 @@ class EyePoseDashboard:
         for index, (label, value, unit, color) in enumerate(values):
             cx = x + 16 + index * col_w
             self.canvas.create_text(cx, y + 48, anchor="nw", fill=MUTED, font=("Sans", 11, "bold"), text=label)
-            self.canvas.create_text(cx, y + 72, anchor="nw", fill=color, font=("Sans", 24, "bold"), text=f"{value:+.2f}")
-            self.canvas.create_text(cx + 114, y + 82, anchor="nw", fill=MUTED, font=("Sans", 10), text=unit)
+            number = f"{value:+.2f}"
+            number_font = ("Sans", 21 if col_w < 150 else 24, "bold")
+            self.canvas.create_text(cx, y + 72, anchor="nw", fill=color, font=number_font, text=number)
+            self.canvas.create_text(cx + col_w - 14, y + 82, anchor="ne", fill=MUTED, font=("Sans", 10), text=unit)
         gaze_text = ""
         if len(packet) >= 11:
             gaze_text = f"    gaze {packet[8]:.3f},{packet[9]:.3f} valid {int(packet[10])}"
@@ -2712,7 +2780,10 @@ class EyePoseDashboard:
             anchor="sw",
             fill=TEXT,
             font=("Sans", 11),
-            text=f"source {self.opentrack_bridge.last_pose_source}    smoothing {'on' if self.smoothing_enabled else 'off'}{gaze_text}",
+            text=ellipsize(
+                f"source {self.opentrack_bridge.last_pose_source}    smoothing {'on' if self.smoothing_enabled else 'off'}{gaze_text}",
+                max(36, int((w - 32) / 7.0)),
+            ),
         )
 
     def draw_gaze_panel(self, x: float, y: float, w: float, h: float) -> None:
@@ -2754,14 +2825,16 @@ class EyePoseDashboard:
             ("yaw", "opentrack_yaw_scale", -30.0, 30.0, 0.25, BLUE, "{:+.2f}"),
             ("pitch", "opentrack_pitch_scale", -30.0, 30.0, 0.25, YELLOW, "{:+.2f}"),
             ("roll", "opentrack_roll_scale", -8.0, 8.0, 0.25, BLUE, "{:+.2f}"),
-            ("x", "opentrack_x_scale", -8.0, 8.0, 0.25, BLUE, "{:+.2f}"),
-            ("y", "opentrack_y_scale", -8.0, 8.0, 0.25, BLUE, "{:+.2f}"),
-            ("z", "opentrack_z_scale", -8.0, 8.0, 0.25, BLUE, "{:+.2f}"),
+            ("x", "opentrack_x_scale", -20.0, 20.0, 0.5, BLUE, "{:+.1f}"),
+            ("y", "opentrack_y_scale", -20.0, 20.0, 0.5, BLUE, "{:+.1f}"),
+            ("z", "opentrack_z_scale", -20.0, 20.0, 0.5, BLUE, "{:+.1f}"),
             ("yaw curve", "opentrack_yaw_curve", 1.0, 4.0, 0.02, BLUE, "{:.2f}"),
             ("pitch curve", "opentrack_pitch_curve", 1.0, 4.0, 0.02, YELLOW, "{:.2f}"),
             ("mp yaw", "mediapipe_yaw_output_scale", 0.01, 1.00, 0.01, BLUE, "{:.2f}"),
             ("mp pitch", "mediapipe_pitch_output_scale", 0.01, 1.00, 0.01, YELLOW, "{:.2f}"),
             ("mp roll", "mediapipe_roll_output_scale", 0.01, 1.00, 0.01, BLUE, "{:.2f}"),
+            ("fb trans", "mediapipe_translation_output_scale", 0.0, 50.0, 0.5, GREEN, "{:.1f}"),
+            ("fb depth", "mediapipe_depth_output_scale", 0.0, 800.0, 10.0, GREEN, "{:.0f}"),
             ("mp p/y", "mediapipe_pitch_yaw_comp", 0.00, 3.00, 0.05, YELLOW, "{:.2f}"),
             ("knee", "opentrack_curve_knee_deg", 5.0, 90.0, 1.0, BLUE, "{:.0f}"),
             ("smooth", "opentrack_output_smoothing", 0.03, 0.50, 0.01, GREEN, "{:.2f}"),
@@ -2778,9 +2851,11 @@ class EyePoseDashboard:
         bridge = self.opentrack_bridge
         age = time.monotonic() - bridge.last_send_monotonic if bridge.last_send_monotonic else 0.0
         status_y = y + h - 54
-        self.value_line(inner_x, status_y, "udp", f"{bridge.sent} packets  age {age:.1f}s  {bridge.last_error or f'sending {self.harness_label()}'}")
+        udp_status = f"{bridge.sent} packets  age {age:.1f}s  {bridge.last_error or f'sending {self.harness_label()}'}"
+        self.value_line(inner_x, status_y, "udp", ellipsize(udp_status, max(34, int(inner_w / 7.5))))
         if bridge.last_packet is not None:
-            self.value_line(inner_x, status_y + 24, "last sent", f"src {self.short_source_for(bridge.last_pose_source)}  yaw {bridge.last_packet[3]:+.1f}  pitch {bridge.last_packet[4]:+.1f}  roll {bridge.last_packet[5]:+.1f}")
+            sent_status = f"src {self.short_source_for(bridge.last_pose_source)}  yaw {bridge.last_packet[3]:+.1f}  pitch {bridge.last_packet[4]:+.1f}  roll {bridge.last_packet[5]:+.1f}"
+            self.value_line(inner_x, status_y + 24, "last sent", ellipsize(sent_status, max(34, int(inner_w / 7.5))))
 
     def draw_face_fallback_panel(self, x: float, y: float, w: float, h: float) -> None:
         self.canvas.create_rectangle(x, y, x + w, y + h, fill="#0b1016", outline=STROKE)
@@ -2812,8 +2887,7 @@ class EyePoseDashboard:
             row_y += 24
             self.value_line(inner_x, row_y, "errors", f"{hq.errors}  timeouts {hq.timeouts}")
             row_y += 24
-        mode = "mapped" if profile_has_pitch_map(self.profile) else "neutral wrap"
-        self.value_line(inner_x, row_y, "pitch map", f"{mode}  {self.pitch_debug_status}")
+        self.value_line(inner_x, row_y, "pitch debug", self.pitch_debug_status)
         row_y += 24
         mapped = "--" if self.pitch_debug_mapped is None else f"{self.pitch_debug_mapped:+.1f}"
         output = "--"
@@ -2826,7 +2900,10 @@ class EyePoseDashboard:
         self.action_button(inner_x + button_w + 8, row_y, button_w, 28, "Dump Pitch CSV", self.dump_pitch_debug)
 
         if self.mediapipe_bridge is not None:
-            row_y = y + h - 186 if h > 260 else row_y + 34
+            compact = h < 300
+            row_y = max(row_y + 44, y + h - (126 if compact else 186))
+            if row_y + (74 if compact else 142) > y + h - 12:
+                return
             self.section(inner_x, row_y, "MEDIAPIPE")
             row_y += 24
             mp = self.latest_mediapipe
@@ -2839,6 +2916,8 @@ class EyePoseDashboard:
                 color = GREEN if self.mediapipe_sample_usable(mp) and age <= self.args.mediapipe_max_age_s else RED
             self.metric_box(inner_x, row_y, w - 32, "MediaPipe", status, color)
             row_y += 70
+            if compact:
+                return
             bridge = self.mediapipe_bridge
             frame_age = time.monotonic() - bridge.last_frame_monotonic if bridge.last_frame_monotonic else 0.0
             self.value_line(inner_x, row_y, "frames", f"seen {bridge.frames_seen} sent {bridge.frames_sent} face {bridge.frames_present} age {frame_age:.1f}s")
@@ -2852,20 +2931,62 @@ class EyePoseDashboard:
         label, x_ratio, y_ratio = CALIBRATION_TARGETS[self.calibration_index]
         x = x_ratio * width
         y = y_ratio * height
-        self.canvas.create_rectangle(0, 0, width, height, fill=BG, stipple="gray50", outline="")
+        self.canvas.create_rectangle(0, 0, width, height, fill=BG, outline="")
+        total = len(CALIBRATION_TARGETS)
+        step = self.calibration_index + 1
+        valid_samples = sum(
+            1
+            for sample in self.samples
+            if sample.gaze_valid == 1 and math.isfinite(sample.gaze_x) and math.isfinite(sample.gaze_y)
+        )
+        gaze_ready = valid_samples >= max(3, min(self.args.gaze_calibration_samples, 8))
+        status_text = "gaze ready" if gaze_ready else "waiting for valid gaze"
+        status_color = GREEN if gaze_ready else YELLOW
+        panel_w = min(width - 48, 780)
+        panel_h = 168
+        panel_x = (width - panel_w) / 2
+        panel_y = 26
+        self.canvas.create_rectangle(panel_x, panel_y, panel_x + panel_w, panel_y + panel_h, fill="#0d1218", outline=STROKE, width=2)
         self.canvas.create_text(
             width / 2,
-            52,
+            panel_y + 20,
+            anchor="n",
             fill=TEXT,
             font=("Sans", 24, "bold"),
-            text=f"Gaze calibration {self.calibration_index + 1}/{len(CALIBRATION_TARGETS)}",
+            text="Gaze calibration",
         )
         self.canvas.create_text(
             width / 2,
-            88,
+            panel_y + 58,
+            anchor="n",
+            fill=YELLOW,
+            font=("Sans", 15, "bold"),
+            text=f"Step {step}/{total}: look at the {label} target",
+        )
+        self.canvas.create_text(
+            width / 2,
+            panel_y + 88,
+            anchor="n",
             fill=MUTED,
-            font=("Sans", 14),
-            text=f"Look at {label}, hold steady, then press Space.",
+            font=("Sans", 13),
+            width=panel_w - 52,
+            text="Keep your head still, look directly at the yellow target, then press Space to capture. Repeat for each target.",
+        )
+        self.canvas.create_text(
+            panel_x + 24,
+            panel_y + panel_h - 30,
+            anchor="w",
+            fill=status_color,
+            font=("Sans", 12, "bold"),
+            text=f"{status_text}  samples {valid_samples}",
+        )
+        self.canvas.create_text(
+            panel_x + panel_w - 24,
+            panel_y + panel_h - 30,
+            anchor="e",
+            fill="#6b7788",
+            font=("Sans", 11),
+            text="Esc/q exits dashboard",
         )
         radius = 34
         color = YELLOW
@@ -2981,93 +3102,6 @@ class EyePoseDashboard:
         self.click_targets.append((slider_x - 10, y, slider_x + slider_w + 10, y + 28, set_value))
         return y + 28
 
-    def load_head_calibration(self) -> HeadCalibrationProfile:
-        profile_file = getattr(self.args, "head_calibration_file", None)
-        if profile_file is None or not profile_file.exists():
-            return HeadCalibrationProfile()
-        try:
-            data = json.loads(profile_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return HeadCalibrationProfile()
-        if not isinstance(data, dict):
-            return HeadCalibrationProfile()
-
-        def number(name: str, default: float) -> float:
-            try:
-                return float(data.get(name, default))
-            except (TypeError, ValueError):
-                return default
-
-        def optional_number(name: str) -> float | None:
-            if data.get(name) is None:
-                return None
-            value = number(name, float("nan"))
-            return value if math.isfinite(value) else None
-
-        return HeadCalibrationProfile(
-            yaw_left_scale=number("yaw_left_scale", 1.0),
-            yaw_right_scale=number("yaw_right_scale", 1.0),
-            yaw_left_sign=number("yaw_left_sign", -1.0),
-            yaw_right_sign=number("yaw_right_sign", 1.0),
-            pitch_up_scale=number("pitch_up_scale", 1.0),
-            pitch_down_scale=number("pitch_down_scale", 1.0),
-            pitch_up_sign=number("pitch_up_sign", 1.0),
-            pitch_down_sign=number("pitch_down_sign", -1.0),
-            roll_left_scale=number("roll_left_scale", 1.0),
-            roll_right_scale=number("roll_right_scale", 1.0),
-            roll_left_sign=number("roll_left_sign", -1.0),
-            roll_right_sign=number("roll_right_sign", 1.0),
-            face_yaw_neutral=optional_number("face_yaw_neutral"),
-            face_pitch_neutral=optional_number("face_pitch_neutral"),
-            face_roll_neutral=optional_number("face_roll_neutral"),
-            pitch_up_mid_raw=optional_number("pitch_up_mid_raw"),
-            pitch_up_mid_value=optional_number("pitch_up_mid_value"),
-            pitch_up_max_raw=optional_number("pitch_up_max_raw"),
-            pitch_up_max_value=optional_number("pitch_up_max_value"),
-            pitch_down_raw=optional_number("pitch_down_raw"),
-            pitch_down_value=optional_number("pitch_down_value"),
-            created=number("created", 0.0),
-        )
-
-    def save_head_calibration(self) -> None:
-        profile_file = getattr(self.args, "head_calibration_file", None)
-        if profile_file is None:
-            return
-        data = {
-            "profile_version": 2,
-            "yaw_left_scale": self.profile.yaw_left_scale,
-            "yaw_right_scale": self.profile.yaw_right_scale,
-            "yaw_left_sign": self.profile.yaw_left_sign,
-            "yaw_right_sign": self.profile.yaw_right_sign,
-            "pitch_up_scale": self.profile.pitch_up_scale,
-            "pitch_down_scale": self.profile.pitch_down_scale,
-            "pitch_up_sign": self.profile.pitch_up_sign,
-            "pitch_down_sign": self.profile.pitch_down_sign,
-            "roll_left_scale": self.profile.roll_left_scale,
-            "roll_right_scale": self.profile.roll_right_scale,
-            "roll_left_sign": self.profile.roll_left_sign,
-            "roll_right_sign": self.profile.roll_right_sign,
-            "face_yaw_neutral": self.profile.face_yaw_neutral,
-            "face_pitch_neutral": self.profile.face_pitch_neutral,
-            "face_roll_neutral": self.profile.face_roll_neutral,
-            "pitch_up_mid_raw": self.profile.pitch_up_mid_raw,
-            "pitch_up_mid_value": self.profile.pitch_up_mid_value,
-            "pitch_up_max_raw": self.profile.pitch_up_max_raw,
-            "pitch_up_max_value": self.profile.pitch_up_max_value,
-            "pitch_down_raw": self.profile.pitch_down_raw,
-            "pitch_down_value": self.profile.pitch_down_value,
-            "created": self.profile.created,
-            "coverage": self.coverage,
-            "samples": len(self.head_cal_samples),
-        }
-        try:
-            profile_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = profile_file.with_suffix(profile_file.suffix + ".tmp")
-            tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            tmp_path.replace(profile_file)
-        except OSError:
-            pass
-
     def save_tuning(self) -> None:
         tuning_file = getattr(self.args, "tuning_file", None)
         if tuning_file is None:
@@ -3131,13 +3165,14 @@ class EyePoseDashboard:
     def confidence_grid(self, x: float, y: float, w: float) -> float:
         gap = 14
         col_w = (w - gap) / 2
+        confidence = self.smoothed_display_confidence()
         items = [
-            ("eye", self.confidence.eye, GREEN),
-            ("face", self.confidence.face, BLUE),
-            ("blend", self.confidence.blended, "#8be8ff"),
-            ("pitch", self.confidence.pitch, YELLOW),
-            ("eye dist", self.confidence.eye_distance_stable, GREEN),
-            ("velocity", self.confidence.velocity_ok, GREEN if self.confidence.velocity_ok > 0.65 else YELLOW),
+            ("eye", confidence.eye, GREEN),
+            ("face", confidence.face, BLUE),
+            ("blend", confidence.blended, "#8be8ff"),
+            ("pitch", confidence.pitch, YELLOW),
+            ("eye dist", confidence.eye_distance_stable, GREEN),
+            ("velocity", confidence.velocity_ok, GREEN if confidence.velocity_ok > 0.65 else YELLOW),
         ]
         row_y = y
         for index in range(0, len(items), 2):
@@ -3149,52 +3184,53 @@ class EyePoseDashboard:
             row_y += 24
         return row_y
 
+    def smoothed_display_confidence(self) -> PoseConfidence:
+        current = self.confidence
+        if not self.display_confidence_initialized:
+            self.display_confidence = PoseConfidence(
+                eye=current.eye,
+                face=current.face,
+                blended=current.blended,
+                eye_distance_stable=current.eye_distance_stable,
+                velocity_ok=current.velocity_ok,
+                pitch=current.pitch,
+            )
+            self.display_confidence_initialized = True
+            return self.display_confidence
+
+        for attr in ("eye", "face", "blended", "eye_distance_stable", "velocity_ok", "pitch"):
+            shown = getattr(self.display_confidence, attr)
+            target = getattr(current, attr)
+            alpha = 0.30 if target >= shown else 0.08
+            setattr(self.display_confidence, attr, shown + (target - shown) * alpha)
+        return self.display_confidence
+
     def calibration_controls(self, x: float, y: float, w: float) -> float:
         self.section(x, y, "CALIBRATION")
         y += 24
-        progress = self.head_cal_progress()
-        state = "active" if self.head_calibrating else ("saved" if self.profile.created else "none")
-        self.value_line(x, y, "head profile", f"{state} {progress:.0f}% coverage")
+        self.value_line(x, y, "head neutral", "Space/c recenters")
         y += 26
-        self.canvas.create_text(x, y, anchor="nw", fill=MUTED, font=("Sans", 9), text=self.head_cal_instruction(), width=w)
-        y += 40
-        y = self.coverage_bars(x, y, w)
-        y += 6
+        if self.screen_profile is None:
+            self.value_line(x, y, "screen", "not calibrated")
+        else:
+            profile = self.screen_profile
+            self.value_line(
+                x,
+                y,
+                "screen",
+                f"{profile.monitor_name} {profile.width_px}x{profile.height_px}  {profile.marker_spacing_px:.0f}px/184mm",
+            )
+        y += 28
+        self.value_line(x, y, "gaze", "calibrated" if self.gaze_affine is not None else "not calibrated")
+        y += 28
         button_w = (w - 16) / 3
-        self.action_button(x, y, button_w, 30, "Save Cal" if self.head_calibrating else "Head Cal", self.start_head_calibration)
-        self.action_button(x + button_w + 8, y, button_w, 30, "Reset Gaze", self.reset_gaze_calibration)
-        self.action_button(x + (button_w + 8) * 2, y, button_w, 30, "Reset Tuning", self.reset_tuning)
+        self.action_button(x, y, button_w, 30, "Recenter", self.recenter)
+        self.action_button(x + button_w + 8, y, button_w, 30, "Gaze Cal", self.start_gaze_calibration)
+        self.action_button(x + (button_w + 8) * 2, y, button_w, 30, "Screen Cal", self.open_screen_calibration)
         y += 38
-        self.action_button(x, y, button_w, 28, "Reset Head", self.reset_head_calibration)
-        return y + 34
-
-    def coverage_bars(self, x: float, y: float, w: float) -> float:
-        target = max(self.args.head_cal_phase_samples, 1)
-        gap = 8
-        cols = 4
-        cell_w = (w - gap * (cols - 1)) / cols
-        row_y = y
-        for index, (key, label) in enumerate(HEAD_CALIBRATION_BINS):
-            cx = x + (index % cols) * (cell_w + gap)
-            if index > 0 and index % cols == 0:
-                row_y += 30
-            self.canvas.create_text(cx, row_y, anchor="nw", fill=MUTED, font=("Sans", 8, "bold"), text=label)
-            bx = cx
-            by = row_y + 14
-            self.canvas.create_rectangle(bx, by, bx + cell_w, by + 8, fill="#101720", outline=STROKE)
-            phase = self.current_head_calibration_phase()
-            active_bins = set(phase[2]) if self.head_calibrating and phase is not None else set()
-            if self.head_calibrating and phase is not None and phase[0] in ("pitch_up", "pitch_down"):
-                active_bins.update(("pitch_up", "pitch_down"))
-            if self.head_calibrating:
-                count = self.head_cal_phase_match_count if key in active_bins else 0
-                ratio = clamp(count / target, 0.0, 1.0)
-            else:
-                count = self.coverage.get(key, 0)
-                ratio = clamp(count / target, 0.0, 1.0)
-            fill = YELLOW if key in active_bins and ratio < 1.0 else GREEN if ratio >= 1.0 else BLUE if ratio > 0.35 else "#536170"
-            self.canvas.create_rectangle(bx, by, bx + cell_w * ratio, by + 8, fill=fill, outline="")
-        return row_y + 30
+        self.action_button(x, y, button_w, 30, "Reset Gaze", self.reset_gaze_calibration)
+        self.action_button(x + button_w + 8, y, button_w, 30, "Reset Tuning", self.reset_tuning)
+        return y + 40
 
     def percent_bar(self, x: float, y: float, w: float, label: str, value: float, color: str) -> None:
         value = clamp(value, 0.0, 1.0)
@@ -3324,25 +3360,25 @@ def load_tuning(args: argparse.Namespace) -> None:
 def load_window_geometry(args: argparse.Namespace) -> str:
     state_file = getattr(args, "window_state_file", None)
     if state_file is None or not state_file.exists():
-        return "1400x900"
+        return DEFAULT_WINDOW_GEOMETRY
     try:
         data = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return "1400x900"
+        return DEFAULT_WINDOW_GEOMETRY
     if not isinstance(data, dict):
-        return "1400x900"
+        return DEFAULT_WINDOW_GEOMETRY
     try:
-        width = int(data.get("width", 1400))
-        height = int(data.get("height", 900))
+        width = int(data.get("width", 1680))
+        height = int(data.get("height", 1050))
         x = int(data.get("x", 0))
         y = int(data.get("y", 0))
     except (TypeError, ValueError):
-        return "1400x900"
+        return DEFAULT_WINDOW_GEOMETRY
     width = int(clamp(width, 600, 3840))
     height = int(clamp(height, 400, 2160))
     x = int(clamp(x, -200, 8000))
     y = int(clamp(y, -200, 8000))
-    return f"{width}x{height}+{x}+{y}"
+    return tk_geometry(width, height, x, y)
 
 
 def main() -> int:
@@ -3365,18 +3401,10 @@ def main() -> int:
     parser.add_argument("--csv", type=Path)
     parser.add_argument("--tuning-file", type=Path, help="Persist live SC/OpenTrack tuning sliders in this JSON file.")
     parser.add_argument("--window-state-file", type=Path, help="Persist dashboard window size and position in this JSON file.")
-    parser.add_argument("--head-calibration-file", type=Path, help="Persist deliberate head-pose calibration separately from quick tuning.")
-    parser.add_argument("--head-cal-min-duration-s", type=float, default=8.0, help="Legacy natural-motion calibration minimum duration.")
-    parser.add_argument("--head-cal-min-samples", type=int, default=80, help="Minimum matched eye/face samples needed to save head calibration.")
-    parser.add_argument("--head-cal-min-eye-confidence", type=float, default=0.65)
-    parser.add_argument("--head-cal-bin-samples", type=int, default=12, help="Legacy alias; guided calibration uses --head-cal-phase-samples.")
-    parser.add_argument("--head-cal-phase-samples", type=int, default=28, help="Fresh samples required for each guided head calibration phase.")
-    parser.add_argument("--head-cal-phase-min-duration-s", type=float, default=0.8, help="Minimum time to spend on each guided calibration phase.")
-    parser.add_argument("--head-cal-axis-threshold-deg", type=float, default=2.0)
-    parser.add_argument("--head-cal-yaw-threshold-deg", type=float, default=4.0, help="Physical yaw movement required from the start of a guided yaw phase.")
-    parser.add_argument("--head-cal-pitch-threshold-deg", type=float, default=8.0, help="Physical pitch movement required from the start of a guided pitch phase.")
-    parser.add_argument("--head-cal-roll-threshold-deg", type=float, default=6.0, help="Physical roll movement required from the start of a guided roll phase.")
-    parser.add_argument("--head-cal-translation-threshold-mm", type=float, default=25.0)
+    parser.add_argument("--screen-calibration-file", type=Path, help="Persist monitor/device physical screen calibration in this JSON file.")
+    parser.add_argument("--gaze-calibration-file", type=Path, help="Persist multi-point gaze calibration in this JSON file.")
+    parser.add_argument("--no-first-run-calibration", dest="first_run_calibration", action="store_false", help="Do not automatically prompt for missing screen/gaze calibration on startup.")
+    parser.set_defaults(first_run_calibration=True)
     parser.add_argument("--eye-distance-tolerance-mm", type=float, default=5.0, help="Eye-distance drift that fades eye-origin head-pose confidence to zero.")
     parser.add_argument("--pose-velocity-soft-limit-dps", type=float, default=160.0, help="Pose velocity where eye-origin confidence begins to decay.")
     parser.add_argument("--pose-velocity-hard-limit-dps", type=float, default=420.0, help="Pose velocity where eye-origin confidence reaches zero.")
@@ -3419,6 +3447,9 @@ def main() -> int:
     parser.add_argument("--mediapipe-yaw-output-scale", type=float, default=0.15, help="Scale MediaPipe yaw before Star Citizen gain/curve output.")
     parser.add_argument("--mediapipe-pitch-output-scale", type=float, default=0.10, help="Scale MediaPipe pitch before Star Citizen gain/curve output.")
     parser.add_argument("--mediapipe-roll-output-scale", type=float, default=0.15, help="Scale MediaPipe roll before Star Citizen gain output.")
+    parser.add_argument("--mediapipe-translation-output-scale", type=float, default=10.0, help="Scale MediaPipe face translation before Star Citizen x/y/z gain output.")
+    parser.add_argument("--mediapipe-depth-output-scale", type=float, default=250.0, help="Scale MediaPipe face-size depth before Star Citizen z gain output.")
+    parser.add_argument("--eye-origin-z-deadband-mm", type=float, default=1.0, help="Use MediaPipe depth fallback when eye-origin z is inside this neutral deadband.")
     parser.add_argument("--mediapipe-pitch-yaw-comp", type=float, default=1.0, help="Compensate MediaPipe pitch attenuation as yaw increases. 0 disables.")
     parser.add_argument("--harness", choices=("tobii", "trackir"), default="tobii", help="Default Star Citizen output harness.")
     parser.add_argument("--tobii-head-pose-source", choices=("face", "blend", "eye"), default="face", help="Live head-pose source for native Tobii output. Face uses MediaPipe primary; blend keeps eye-origin primary with face fallback.")
@@ -3443,9 +3474,9 @@ def main() -> int:
     parser.add_argument("--opentrack-yaw-scale", type=float, default=1.0)
     parser.add_argument("--opentrack-pitch-scale", type=float, default=1.0)
     parser.add_argument("--opentrack-roll-scale", type=float, default=1.0)
-    parser.add_argument("--opentrack-x-scale", type=float, default=1.0)
-    parser.add_argument("--opentrack-y-scale", type=float, default=1.0)
-    parser.add_argument("--opentrack-z-scale", type=float, default=1.0)
+    parser.add_argument("--opentrack-x-scale", type=float, default=-3.0)
+    parser.add_argument("--opentrack-y-scale", type=float, default=3.0)
+    parser.add_argument("--opentrack-z-scale", type=float, default=4.0)
     parser.add_argument("--opentrack-output-smoothing", type=float, default=0.03, help="Stationary EMA alpha for values sent to TrackIR. Lower is smoother.")
     parser.add_argument("--opentrack-motion-smoothing", type=float, default=0.05, help="EMA alpha used during deliberate movement. Higher is more responsive.")
     parser.add_argument("--opentrack-prediction-ms", type=float, default=45.0, help="Output lookahead used to fill motion between sensor samples.")
@@ -3465,11 +3496,6 @@ def main() -> int:
     root_dir = repo_root()
     if args.hq_frames:
         build_hq_frame_worker(root_dir, args.skip_build)
-    if args.head_calibration_file is None:
-        if args.tuning_file is not None:
-            args.head_calibration_file = args.tuning_file.with_name("sc-head-calibration.json")
-        else:
-            args.head_calibration_file = root_dir / ".tmp" / "eye-pose-dashboard" / "head-calibration.json"
     use_ttp_mux = True
     build_mux_sampler(root_dir, args.skip_build)
     sampler = root_dir / "build" / "tobii-ttp-mux"

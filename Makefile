@@ -1,8 +1,8 @@
-.PHONY: all runtime services dashboard headless status clear-logs preflight \
+.PHONY: all runtime runtime-clean services dashboard headless status clear-logs preflight \
 	sc-tobii-stock-runtime sc-tobii-stock-runtime-services \
 	sc-tobii-stock-runtime-dashboard sc-tobii-stock-runtime-headless \
 	sc-tobii-stock-runtime-status sc-tobii-stock-runtime-clear-logs \
-	sc-tobii-stock-preflight sc-tobii-stock-install-launch-hook \
+	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight sc-tobii-stock-install-launch-hook \
 	sc-tobii-stock-disable-launch-hook \
 	mediapipe-python mediapipe-venv mediapipe-fetch-model \
 	install-launch-hook disable-launch-hook install-udev-rule clean
@@ -43,6 +43,21 @@ runtime: all mediapipe-venv mediapipe-fetch-model preflight
 	./scripts/app/run-sc-tobii-native-runtime.sh dashboard
 
 sc-tobii-stock-runtime: runtime
+
+runtime-clean: all mediapipe-venv mediapipe-fetch-model preflight
+	@work_dir="$${SC_TOBII_NATIVE_RUNTIME_DIR:-.tmp/sc-tobii-native-runtime}"; \
+	tuning_file="$${SC_TUNING_FILE:-$$work_dir/sc-tuning.json}"; \
+	window_state_file="$${SC_WINDOW_STATE_FILE:-$$work_dir/sc-window.json}"; \
+	screen_calibration_file="$${SC_SCREEN_CALIBRATION_FILE:-$$work_dir/screen-calibration.json}"; \
+	gaze_calibration_file="$${SC_GAZE_CALIBRATION_FILE:-$$work_dir/gaze-calibration.json}"; \
+	echo "clearing runtime user settings and calibrations"; \
+	rm -f "$$tuning_file" "$$tuning_file.tmp" \
+	      "$$window_state_file" "$$window_state_file.tmp" \
+	      "$$screen_calibration_file" "$$screen_calibration_file.tmp" \
+	      "$$gaze_calibration_file" "$$gaze_calibration_file.tmp"
+	./scripts/app/run-sc-tobii-native-runtime.sh dashboard
+
+sc-tobii-stock-runtime-clean: runtime-clean
 
 headless: all mediapipe-venv mediapipe-fetch-model preflight
 	./scripts/app/run-sc-tobii-native-runtime.sh headless

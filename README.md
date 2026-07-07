@@ -93,6 +93,7 @@ pose delivery.
 ## Useful Targets
 
 - `make runtime` starts services plus dashboard.
+- `make runtime-clean` clears saved tuning/window/calibration state, then starts the runtime for first-run testing.
 - `make services` starts only the Wine-visible Tobii compatibility services.
 - `make dashboard` starts only the Linux dashboard/data producer.
 - `make status` analyzes runtime logs.
@@ -106,4 +107,3 @@ pose delivery.
 - [Runtime architecture](docs/integrations/star-citizen-stock-tobii-runtime-architecture.md)
 - [Stock runtime diagram](docs/diagrams/star-citizen-stock-tobii-runtime.puml)
 - [Stock DLL discovery notes](docs/recon/star-citizen-stock-dll-discovery.md)
-

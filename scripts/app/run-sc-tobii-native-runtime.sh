@@ -123,6 +123,7 @@ fi
 : >"$work_dir/tobiiprp-prefixed-pipe-spy.stdout"
 
 if [[ "${SC_POC_KEEP_EXISTING_CAPTURE:-0}" != "1" ]]; then
+  kill_matching_except_self "run-sc-tobii-native-runtime.sh services"
   pkill -f "$root_dir/scripts/recon/eye-pose-dashboard.py" 2>/dev/null || true
   pkill -f "$root_dir/build/tobii-ttp-mux" 2>/dev/null || true
   pkill -f "$root_dir/build/tobii-gaze-native" 2>/dev/null || true
@@ -311,8 +312,9 @@ if [[ -n "$tobiiprp_prefixed_pid" ]] && ! kill -0 "$tobiiprp_prefixed_pid" 2>/de
 fi
 
 tuning_file="${SC_TUNING_FILE:-$work_dir/sc-tuning.json}"
-head_calibration_file="${SC_HEAD_CALIBRATION_FILE:-$work_dir/sc-head-calibration.json}"
 window_state_file="${SC_WINDOW_STATE_FILE:-$work_dir/sc-window.json}"
+screen_calibration_file="${SC_SCREEN_CALIBRATION_FILE:-$work_dir/screen-calibration.json}"
+gaze_calibration_file="${SC_GAZE_CALIBRATION_FILE:-$work_dir/gaze-calibration.json}"
 echo "native Tobii runtime active"
 echo "middleware_log=$work_dir/middleware-spy.log"
 echo "pipe_log=$work_dir/middleware-pipe-spy.log"
@@ -321,7 +323,6 @@ echo "tobii_prefixed_pipe_log=$work_dir/tobii-prefixed-pipe-spy.log"
 echo "live_gaze_udp=127.0.0.1:$middleware_udp_port"
 echo "display_binding name=$display_name id=$display_id rect=${display_rect:-$display_x,$display_y,$display_width,$display_height} area_mode=$display_area_mode"
 echo "dashboard output defaults to Tobii; TrackIR fallback target is 127.0.0.1:$trackir_udp_port"
-echo "head_calibration_file=$head_calibration_file"
 echo
 
 common_args=(
@@ -335,9 +336,9 @@ common_args=(
   --opentrack-pitch-scale "${SC_TOBII_PITCH_SCALE:--14.0}"
   --opentrack-roll-scale "${SC_TOBII_ROLL_SCALE:-1.0}"
   --tobii-roll-source "${SC_TOBII_ROLL_SOURCE:-pose}"
-  --opentrack-x-scale "${SC_TOBII_X_SCALE:-1.0}"
-  --opentrack-y-scale "${SC_TOBII_Y_SCALE:-1.0}"
-  --opentrack-z-scale "${SC_TOBII_Z_SCALE:-1.0}"
+  --opentrack-x-scale "${SC_TOBII_X_SCALE:--3.0}"
+  --opentrack-y-scale "${SC_TOBII_Y_SCALE:-3.0}"
+  --opentrack-z-scale "${SC_TOBII_Z_SCALE:-4.0}"
   --opentrack-output-smoothing "${SC_TOBII_OUTPUT_SMOOTHING:-0.03}"
   --opentrack-motion-smoothing "${SC_TOBII_MOTION_SMOOTHING:-0.05}"
   --opentrack-prediction-ms "${SC_TOBII_PREDICTION_MS:-45.0}"
@@ -353,13 +354,17 @@ common_args=(
   --mediapipe-yaw-output-scale "${SC_TOBII_MEDIAPIPE_YAW_SCALE:-0.15}"
   --mediapipe-pitch-output-scale "${SC_TOBII_MEDIAPIPE_PITCH_SCALE:-0.10}"
   --mediapipe-roll-output-scale "${SC_TOBII_MEDIAPIPE_ROLL_SCALE:-0.15}"
+  --mediapipe-translation-output-scale "${SC_TOBII_MEDIAPIPE_TRANSLATION_SCALE:-10.0}"
+  --mediapipe-depth-output-scale "${SC_TOBII_MEDIAPIPE_DEPTH_SCALE:-250.0}"
+  --eye-origin-z-deadband-mm "${SC_TOBII_EYE_Z_DEADBAND_MM:-1.0}"
   --mediapipe-pitch-yaw-comp "${SC_TOBII_MEDIAPIPE_PITCH_YAW_COMP:-1.0}"
   --mediapipe-rotation-mode "${SC_TOBII_MEDIAPIPE_ROTATION_MODE:-forward}"
   --mediapipe-pose-source "${SC_TOBII_MEDIAPIPE_POSE_SOURCE:-hybrid}"
   --blink-hold-s "${SC_TOBII_BLINK_HOLD_S:-0.20}"
   --tuning-file "$tuning_file"
-  --head-calibration-file "$head_calibration_file"
   --window-state-file "$window_state_file"
+  --screen-calibration-file "$screen_calibration_file"
+  --gaze-calibration-file "$gaze_calibration_file"
 )
 
 case "$mode" in
