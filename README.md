@@ -30,16 +30,77 @@ The research repository contains many exploratory probes and reverse
 engineering artifacts. This repository intentionally keeps only the runtime and
 the docs needed to run, debug, and polish the current system.
 
-## Requirements
+## Install With Installer
 
-System packages:
+For the normal setup path, run:
+
+```bash
+./install.sh
+```
+
+The installer handles the setup work for you:
+
+- Checks and installs distro packages where supported.
+- Installs the Tobii udev rule for USB permissions.
+- Prepares a MediaPipe-compatible Python environment.
+- Downloads the MediaPipe face model.
+- Builds the runtime helpers.
+- Creates an application-menu entry named `Tobii Dashboard`.
+- Reports whether Star Citizen was detected and checks that its Tobii DLL is
+  stock when possible.
+
+Installer options:
+
+```bash
+./install.sh --preflight            # dry-run report; make no changes
+./install.sh --no-system-packages   # manage distro packages yourself
+./install.sh --no-udev              # skip USB permission rule install
+./install.sh --no-desktop           # skip menu entry creation
+./install.sh --no-sc-check          # skip Star Citizen stock DLL safety check
+```
+
+After installation, replug the Tobii device or reboot if device permissions do
+not update immediately. Then open `Tobii Dashboard` from your application menu.
+
+On first launch, the dashboard guides you through screen calibration and gaze
+calibration.
+
+Then launch Star Citizen normally. In-game, set head tracking source to `Tobii`
+and enable head tracking.
+
+To remove generated files and the application-menu entry:
+
+```bash
+./uninstall.sh
+```
+
+The uninstaller keeps distro packages installed by default. To remove the
+installer-known packages too:
+
+```bash
+./uninstall.sh --remove-packages
+```
+
+To preview removal without changing anything:
+
+```bash
+./uninstall.sh --preflight
+```
+
+## Manual Install
+
+Use this path if you prefer to manage dependencies yourself or if your distro is
+not handled by `install.sh`.
+
+Install system packages:
 
 ```bash
 sudo apt install build-essential make pkg-config libusb-1.0-0-dev libssl-dev \
   mingw-w64 wine python3-tk curl
 ```
 
-MediaPipe requires Python 3.11 or 3.12. If your distro Python is newer, use:
+MediaPipe requires Python 3.11 or 3.12. If your distro Python is newer, use the
+project-local Python setup:
 
 ```bash
 make mediapipe-python
@@ -52,8 +113,6 @@ If you already have Python 3.11/3.12:
 MEDIAPIPE_PYTHON=/path/to/python3.12 make mediapipe-venv
 ```
 
-## Device Permissions
-
 Install the udev rule:
 
 ```bash
@@ -61,8 +120,6 @@ make install-udev-rule
 ```
 
 Then replug the Tobii device or reboot if needed.
-
-## First Run
 
 Fetch the MediaPipe face model and build the runtime helpers:
 
@@ -77,10 +134,15 @@ Start the full runtime:
 make runtime
 ```
 
-Then launch Star Citizen normally. In-game, set head tracking source to
-`Tobii` and enable head tracking.
+Or start just the dashboard without the Star Citizen stock-DLL preflight:
 
-Check status after the game has initialized:
+```bash
+make dashboard
+```
+
+## Runtime Status
+
+After Star Citizen has initialized, check:
 
 ```bash
 make status
