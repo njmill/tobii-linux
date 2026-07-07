@@ -3,12 +3,14 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root_dir"
+source "$root_dir/scripts/app/sc-bin64.sh"
 
 app_name="Tobii Dashboard"
 desktop_id="tobii-dashboard.desktop"
 launcher_path="${HOME}/.local/bin/tobii-dashboard"
 desktop_path="${HOME}/.local/share/applications/${desktop_id}"
 udev_rule="/etc/udev/rules.d/99-tobii-eyetracker5.rules"
+runtime_config="$(sc_config_file)"
 
 remove_packages=0
 dry_run=0
@@ -192,7 +194,7 @@ print_plan() {
   echo "  - build outputs: build/, .tmp/sc-tobii-stock-recon/"
   echo "  - MediaPipe venv: .venv/mediapipe/"
   [[ "$keep_mediapipe_model" -eq 1 ]] && echo "  - keep MediaPipe model" || echo "  - MediaPipe model: assets/mediapipe/face_landmarker.task"
-  [[ "$keep_user_data" -eq 1 ]] && echo "  - keep runtime user data/logs" || echo "  - runtime user data/logs: .tmp/sc-tobii-native-runtime/"
+  [[ "$keep_user_data" -eq 1 ]] && echo "  - keep runtime user data/logs/config" || echo "  - runtime user data/logs/config: .tmp/sc-tobii-native-runtime/, $runtime_config"
   echo "  - udev rule: $udev_rule"
   if [[ "$remove_packages" -eq 1 ]]; then
     if [[ "$pm" == "none" ]]; then
@@ -235,6 +237,7 @@ rm_path "$root_dir/.tmp/uv"
 rm_path "$root_dir/.tmp/uv-python"
 if [[ "$keep_user_data" -eq 0 ]]; then
   rm_path "$root_dir/.tmp/sc-tobii-native-runtime"
+  rm_path "$runtime_config"
 fi
 if [[ "$keep_mediapipe_model" -eq 0 ]]; then
   rm_path "$root_dir/assets/mediapipe/face_landmarker.task"

@@ -38,8 +38,9 @@ The installer handles the setup work for you:
 - Downloads the MediaPipe face model.
 - Builds the runtime helpers.
 - Creates an application-menu entry named `Tobii Dashboard`.
-- Reports whether Star Citizen was detected and checks that its Tobii DLL is
-  stock when possible.
+- Searches common Star Citizen Wine/Lutris/Bottles/Heroic/Steam locations,
+  saves the detected runtime path, and checks that its Tobii DLL is stock when
+  possible.
 
 Installer options:
 
@@ -59,6 +60,21 @@ calibration.
 
 Then launch Star Citizen normally. In-game, set head tracking source to `Tobii`
 and enable head tracking.
+
+If Star Citizen is installed in a custom location and the installer does not
+detect it, set the `Bin64` path once and rerun the installer:
+
+```bash
+SC_BIN64="/path/to/StarCitizen/LIVE/Bin64" ./install.sh
+```
+
+The installer writes the detected path to:
+
+```text
+~/.config/tobii-linux/runtime.env
+```
+
+The menu launcher and `make runtime` load that file automatically.
 
 To remove generated files and the application-menu entry:
 
@@ -83,6 +99,9 @@ Advanced installer/runtime environment:
 
 - `MEDIAPIPE_UV_VERSION` controls the pinned `uv` release used only when the
   installer needs to bootstrap a local Python for MediaPipe.
+- `SC_BIN64=/path/to/StarCitizen/LIVE/Bin64` overrides Star Citizen detection.
+- `STAR_CITIZEN_PREFIX=/path/to/wine-prefix` overrides the Wine prefix used for
+  Wine-visible Tobii compatibility services.
 - `SC_TOBII_PIPE_SUFFIX_SCAN=1` enables a diagnostic Wine named-pipe fallback
   used during protocol debugging. It is off by default for normal runtime use.
 

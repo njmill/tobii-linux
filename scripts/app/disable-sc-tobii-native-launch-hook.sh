@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-prefix="${STAR_CITIZEN_PREFIX:-$HOME/Games/star-citizen}"
-launch_script="${STAR_CITIZEN_LAUNCH_SCRIPT:-$prefix/sc-launch.sh}"
 tobii_begin="# tobii-linux-native-tobii-hook begin"
 tobii_end="# tobii-linux-native-tobii-hook end"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$root_dir/scripts/app/sc-bin64.sh"
+sc_load_config
+if [[ -z "${STAR_CITIZEN_PREFIX:-}" && -n "${SC_BIN64:-}" ]]; then
+  STAR_CITIZEN_PREFIX="$(sc_prefix_from_bin64 "$SC_BIN64" || true)"
+fi
+prefix="${STAR_CITIZEN_PREFIX:-$HOME/Games/star-citizen}"
+launch_script="${STAR_CITIZEN_LAUNCH_SCRIPT:-$prefix/sc-launch.sh}"
 
 if [[ ! -f "$launch_script" ]]; then
   echo "error: launch script not found: $launch_script" >&2

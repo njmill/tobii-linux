@@ -2,6 +2,8 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$root_dir/scripts/app/sc-bin64.sh"
+sc_load_config
 work_dir="${SC_TOBII_NATIVE_RUNTIME_DIR:-$root_dir/.tmp/sc-tobii-native-runtime}"
 stock_dir="$root_dir/.tmp/sc-tobii-stock-recon"
 mode="${1:-dashboard}"
@@ -9,16 +11,68 @@ middleware_port="${SC_TOBII_MIDDLEWARE_PORT:-4455}"
 middleware_udp_port="${SC_TOBII_MIDDLEWARE_UDP_PORT:-4457}"
 tobii_udp_port="${SC_TOBII_PORT:-4243}"
 trackir_udp_port="${SC_TRACKIR_BRIDGE_PORT:-4242}"
+if [[ -z "${STAR_CITIZEN_PREFIX:-}" && -n "${SC_BIN64:-}" ]]; then
+  STAR_CITIZEN_PREFIX="$(sc_prefix_from_bin64 "$SC_BIN64" || true)"
+fi
 prefix="${STAR_CITIZEN_PREFIX:-$HOME/Games/star-citizen}"
 wine_bin="${STAR_CITIZEN_WINE:-}"
 display_name="${SC_TOBII_DISPLAY_NAME:-\\\\.\\DISPLAY1}"
 display_id="${SC_TOBII_DISPLAY_ID:-DISPLAY\\DEFAULT_MONITOR\\0000&0000}"
 display_x="${SC_TOBII_DISPLAY_X:-0}"
 display_y="${SC_TOBII_DISPLAY_Y:-0}"
-display_width="${SC_TOBII_DISPLAY_WIDTH:-6000}"
-display_height="${SC_TOBII_DISPLAY_HEIGHT:-1440}"
+display_width="${SC_TOBII_DISPLAY_WIDTH:-}"
+display_height="${SC_TOBII_DISPLAY_HEIGHT:-}"
 display_rect="${SC_TOBII_DISPLAY_RECT:-}"
 display_area_mode="${SC_TOBII_DISPLAY_AREA_MODE:-dynamic}"
+
+detect_display_geometry() {
+  local line geom
+  if command -v xrandr >/dev/null 2>&1; then
+    line="$(
+      xrandr --current 2>/dev/null \
+        | awk '/ connected/ && / primary / {print; exit}'
+    )"
+    if [[ -z "$line" ]]; then
+      line="$(
+        xrandr --current 2>/dev/null \
+          | awk '/ connected/ {print; exit}'
+      )"
+    fi
+    geom="$(grep -oE '[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+' <<<"$line" | head -1 || true)"
+    if [[ "$geom" =~ ^([0-9]+)x([0-9]+)([+-][0-9]+)([+-][0-9]+)$ ]]; then
+      display_width="${BASH_REMATCH[1]}"
+      display_height="${BASH_REMATCH[2]}"
+      display_x="${BASH_REMATCH[3]}"
+      display_y="${BASH_REMATCH[4]}"
+      display_x="${display_x#+}"
+      display_y="${display_y#+}"
+      return 0
+    fi
+  fi
+
+  if command -v xdpyinfo >/dev/null 2>&1; then
+    geom="$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; exit}')"
+    if [[ "$geom" =~ ^[0-9]+x[0-9]+$ ]]; then
+      display_width="${geom%%x*}"
+      display_height="${geom##*x}"
+      display_x="${display_x:-0}"
+      display_y="${display_y:-0}"
+      return 0
+    fi
+  fi
+
+  display_width="${display_width:-6000}"
+  display_height="${display_height:-1440}"
+  display_x="${display_x:-0}"
+  display_y="${display_y:-0}"
+  return 1
+}
+
+if [[ -z "$display_rect" && ( -z "$display_width" || -z "$display_height" ) ]]; then
+  detect_display_geometry || true
+fi
+display_width="${display_width:-6000}"
+display_height="${display_height:-1440}"
 
 if [[ -z "$wine_bin" && -f "$prefix/sc-launch.sh" ]]; then
   wine_path="$(
@@ -359,7 +413,12 @@ echo "pipe_log=$work_dir/middleware-pipe-spy.log"
 echo "etdefaultpipe_log=$work_dir/etdefaultpipe-spy.log"
 echo "tobii_prefixed_pipe_log=$work_dir/tobii-prefixed-pipe-spy.log"
 echo "live_gaze_udp=127.0.0.1:$middleware_udp_port"
+echo "wine_prefix=$prefix"
+echo "wine_bin=$wine_bin"
 echo "display_binding name=$display_name id=$display_id rect=${display_rect:-$display_x,$display_y,$display_width,$display_height} area_mode=$display_area_mode"
+if [[ -z "${STAR_CITIZEN_WINE:-}" && ! -f "$prefix/sc-launch.sh" ]]; then
+  echo "warning: using wine from PATH; set STAR_CITIZEN_WINE if Star Citizen uses a custom Lutris/Heroic/Proton runner" >&2
+fi
 echo "dashboard output defaults to Tobii; TrackIR fallback target is 127.0.0.1:$trackir_udp_port"
 echo
 

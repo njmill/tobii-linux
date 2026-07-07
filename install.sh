@@ -225,6 +225,11 @@ root="$root_dir"
 log_dir="\${XDG_STATE_HOME:-\$HOME/.local/state}/tobii-linux"
 mkdir -p "\$log_dir"
 log="\$log_dir/dashboard.log"
+config="\${XDG_CONFIG_HOME:-\$HOME/.config}/tobii-linux/runtime.env"
+if [[ -f "\$config" ]]; then
+  # shellcheck disable=SC1090
+  source "\$config"
+fi
 cd "\$root"
 {
   echo
@@ -258,6 +263,18 @@ EOF
 
 find_sc_bin64() {
   sc_find_bin64
+}
+
+persist_sc_detection() {
+  local bin64="$1"
+  if [[ -z "$bin64" || ! -d "$bin64" ]]; then
+    return 0
+  fi
+  local prefix=""
+  prefix="$(sc_prefix_from_bin64 "$bin64" || true)"
+  local config_file=""
+  config_file="$(sc_write_runtime_config "$bin64" "$prefix" "${STAR_CITIZEN_WINE:-}")"
+  echo "runtime_config=$config_file"
 }
 
 report_sc_detection() {
@@ -348,6 +365,12 @@ print_preflight_report() {
 
   echo "Star Citizen detection:"
   report_sc_detection "$sc_bin64" || true
+  if [[ -n "$sc_bin64" && -d "$sc_bin64" ]]; then
+    local prefix=""
+    prefix="$(sc_prefix_from_bin64 "$sc_bin64" || true)"
+    [[ -n "$prefix" ]] && echo "star_citizen_prefix=$prefix"
+    echo "would_write_runtime_config=$(sc_config_file)"
+  fi
   echo
   echo "No changes were made."
 }
@@ -393,6 +416,7 @@ fi
 
 log "Star Citizen detection"
 report_sc_detection "$sc_bin64" || true
+persist_sc_detection "$sc_bin64"
 
 if [[ "$run_sc_check" -eq 1 ]]; then
   run_stock_dll_check "$sc_bin64"
