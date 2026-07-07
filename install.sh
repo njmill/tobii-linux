@@ -220,8 +220,16 @@ write_desktop_launcher() {
 cat >"$launcher_path" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$root_dir"
-exec make dashboard
+root="$root_dir"
+log_dir="\${XDG_STATE_HOME:-\$HOME/.local/state}/tobii-linux"
+mkdir -p "\$log_dir"
+log="\$log_dir/dashboard.log"
+cd "\$root"
+{
+  echo
+  echo "---- \$(date -Is) starting Tobii Dashboard from \$root ----"
+} >>"\$log"
+exec env SC_TOBII_STOCK_DLL_PREFLIGHT=0 ./scripts/app/run-sc-tobii-native-runtime.sh dashboard >>"\$log" 2>&1
 EOF
   chmod 0755 "$launcher_path"
 
@@ -244,6 +252,7 @@ EOF
 
   echo "desktop_entry=$desktop_path"
   echo "launcher=$launcher_path"
+  echo "launcher_log=\${XDG_STATE_HOME:-\$HOME/.local/state}/tobii-linux/dashboard.log"
 }
 
 find_sc_bin64() {
@@ -407,6 +416,8 @@ Next steps:
   1. Replug the Tobii Eye Tracker 5, or reboot if device permissions do not update.
   2. Open "$app_name" from your application menu, or run:
        make runtime
+     If the menu item does not appear to open, check:
+       ${XDG_STATE_HOME:-$HOME/.local/state}/tobii-linux/dashboard.log
   3. On first launch, complete screen calibration and gaze calibration.
   4. Start Star Citizen and select Tobii for head tracking.
 

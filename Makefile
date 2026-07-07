@@ -11,6 +11,9 @@ CC ?= cc
 MINGW64_CC ?= x86_64-w64-mingw32-gcc
 CFLAGS ?= -O2 -Wall -Wextra
 SC_TOBII_STOCK_RECON_DIR ?= .tmp/sc-tobii-stock-recon
+MEDIAPIPE_VENV ?= .venv/mediapipe
+MEDIAPIPE_READY := $(MEDIAPIPE_VENV)/.ready
+MEDIAPIPE_MODEL := assets/mediapipe/face_landmarker.task
 
 LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
 LIBUSB_LIBS := $(shell pkg-config --libs libusb-1.0 2>/dev/null)
@@ -30,10 +33,15 @@ $(SC_TOBII_STOCK_RECON_DIR)/tobii-middleware-pipe-spy.exe: tools/app/tobii-middl
 mediapipe-python:
 	./scripts/recon/setup-mediapipe-python.sh
 
-mediapipe-venv:
-	./scripts/recon/setup-mediapipe-venv.sh
+mediapipe-venv: $(MEDIAPIPE_READY)
 
-mediapipe-fetch-model:
+$(MEDIAPIPE_READY): requirements-mediapipe.txt scripts/recon/setup-mediapipe-venv.sh scripts/recon/mediapipe-face-worker.py
+	./scripts/recon/setup-mediapipe-venv.sh
+	touch "$@"
+
+mediapipe-fetch-model: $(MEDIAPIPE_MODEL)
+
+$(MEDIAPIPE_MODEL): scripts/recon/fetch-mediapipe-face-landmarker.sh
 	./scripts/recon/fetch-mediapipe-face-landmarker.sh
 
 preflight:
