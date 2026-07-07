@@ -7,6 +7,7 @@ uv_dir="${MEDIAPIPE_UV_DIR:-.tmp/uv}"
 uv_bin="$uv_dir/uv"
 python_dir="${MEDIAPIPE_PYTHON_DIR:-.tmp/uv-python}"
 python_version="${MEDIAPIPE_PYTHON_VERSION:-3.12}"
+uv_version="${MEDIAPIPE_UV_VERSION:-0.8.2}"
 
 mkdir -p "$uv_dir" "$python_dir"
 
@@ -24,10 +25,14 @@ if [[ ! -x "$uv_bin" ]]; then
       ;;
   esac
 
-  url="https://github.com/astral-sh/uv/releases/latest/download/uv-${uv_arch}.tar.gz"
+  archive_name="uv-${uv_arch}.tar.gz"
+  url="https://github.com/astral-sh/uv/releases/download/${uv_version}/${archive_name}"
+  checksum_url="${url}.sha256"
   echo "downloading uv: $url"
-  curl -L --fail "$url" -o "$tmpdir/uv.tar.gz"
-  tar -xzf "$tmpdir/uv.tar.gz" -C "$tmpdir"
+  curl -L --fail "$url" -o "$tmpdir/$archive_name"
+  curl -L --fail "$checksum_url" -o "$tmpdir/$archive_name.sha256"
+  (cd "$tmpdir" && sha256sum -c "$archive_name.sha256")
+  tar -xzf "$tmpdir/$archive_name" -C "$tmpdir"
   install -m 755 "$tmpdir/uv-${uv_arch}/uv" "$uv_bin"
 fi
 

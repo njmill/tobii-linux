@@ -42,8 +42,6 @@
 #define ACC_BUFFER_BYTES (2 * 1024 * 1024)
 #define MAX_FRAME_BYTES (2 * 1024 * 1024)
 #define MAX_PACKET_BYTES 4096
-#define MAX_LINE_BYTES 16384
-#define DEFAULT_INIT_FILE "references/external/simonvc-tobii_ffg/captures/talon_init_out.txt"
 #define REALM_KEY "IS2LJC6GIRBBEK2K\0"
 
 static volatile sig_atomic_t stop_requested = 0;
@@ -117,32 +115,6 @@ static double fixed16x16_at(const unsigned char *buf, size_t offset) {
 
 static void print_libusb_error(const char *context, int err) {
     fprintf(stderr, "%s: %s (%d)\n", context, libusb_error_name(err), err);
-}
-
-static int hex_value(int c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static int parse_hex_line(const char *line, unsigned char *out, size_t out_cap) {
-    int high = -1;
-    size_t len = 0;
-    for (const char *p = line; *p != '\0'; p++) {
-        if (*p == '#') break;
-        if (isspace((unsigned char)*p)) continue;
-        int nibble = hex_value((unsigned char)*p);
-        if (nibble < 0) return -1;
-        if (high < 0) {
-            high = nibble;
-        } else {
-            if (len >= out_cap) return -2;
-            out[len++] = (unsigned char)((high << 4) | nibble);
-            high = -1;
-        }
-    }
-    return high < 0 ? (int)len : -3;
 }
 
 static int mkdir_p_one(const char *path) {
@@ -502,48 +474,6 @@ static int drain_available_frames(libusb_device_handle *handle, struct parser *p
         drained++;
     }
     return drained;
-}
-
-static int send_public_init_sequence(libusb_device_handle *handle,
-                                     struct parser *parser,
-                                     const char *path,
-                                     int *command_count) {
-    FILE *file = fopen(path, "r");
-    if (file == NULL) {
-        perror(path);
-        return -1;
-    }
-
-    char line[MAX_LINE_BYTES];
-    unsigned char command[MAX_PACKET_BYTES];
-    int count = 0;
-
-    while (fgets(line, sizeof(line), file) != NULL) {
-        int command_len = parse_hex_line(line, command, sizeof(command));
-        if (command_len == 0) continue;
-        if (command_len < 0) {
-            fprintf(stderr, "public_init parse_error command=%d code=%d\n", count, command_len);
-            fclose(file);
-            return -1;
-        }
-        int err = send_packet(handle, command, (size_t)command_len);
-        if (err != 0) {
-            fprintf(stderr, "public_init command=%d error=%s (%d)\n", count, libusb_error_name(err), err);
-            fclose(file);
-            return err;
-        }
-        int drained = drain_available_frames(handle, parser, 4);
-        if (drained < 0) {
-            fprintf(stderr, "public_init drain command=%d error=%s (%d)\n", count, libusb_error_name(drained), drained);
-            fclose(file);
-            return drained;
-        }
-        count++;
-    }
-
-    fclose(file);
-    *command_count = count;
-    return 0;
 }
 
 static int send_request_wait_response(libusb_device_handle *handle,
@@ -1017,7 +947,7 @@ static bool decode_gaze_sample(const unsigned char *payload, uint32_t payload_le
     return true;
 }
 
-static int run_tobiifree_handshake(libusb_device_handle *handle, struct parser *parser, uint32_t *next_seq) {
+static int run_native_handshake(libusb_device_handle *handle, struct parser *parser, uint32_t *next_seq) {
     unsigned char packet[MAX_PACKET_BYTES];
     struct ttp_frame response;
     uint32_t seq = 1;
@@ -1072,7 +1002,7 @@ static int run_tobiifree_handshake(libusb_device_handle *handle, struct parser *
     return 0;
 }
 
-static int run_tobiifree_post_connect(libusb_device_handle *handle, struct parser *parser, uint32_t *next_seq) {
+static int run_native_post_connect(libusb_device_handle *handle, struct parser *parser, uint32_t *next_seq) {
     unsigned char packet[MAX_PACKET_BYTES];
     struct ttp_frame response;
     uint32_t seq = *next_seq;
@@ -1278,12 +1208,13 @@ static bool decode_image_payload(uint32_t object_id,
     if (frame->stride == 0) frame->stride = frame->width;
     if (image_value == NULL || image_value_len < 4) return false;
     uint32_t image_len = be32_at(image_value, 0);
+    uint64_t required_image_len = (uint64_t)frame->stride * (uint64_t)frame->height;
     if (image_len > image_value_len - 4 ||
         frame->width == 0 ||
         frame->height == 0 ||
         frame->stride == 0 ||
         frame->width > frame->stride ||
-        image_len < frame->stride * frame->height) {
+        (uint64_t)image_len < required_image_len) {
         return false;
     }
     frame->image = image_value + 4;
@@ -1452,7 +1383,7 @@ static void usage(const char *argv0) {
             "usage: %s [--label name] [--seconds n] [--samples n] [--csv path]\n"
             "          [--out dir] [--events-csv path] [--streams 050e,1771]\n"
             "          [--image-write-hz n] [--image-ring-size n]\n"
-            "          [--startup public|tobiifree] [--file init_hex_path]\n"
+            "          [--startup native]\n"
             "          [--display-area none|big|rect]\n"
             "          [--display-width-mm n] [--display-height-mm n]\n"
             "          [--display-origin-x-mm n] [--display-origin-y-mm n] [--display-z-mm n]\n"
@@ -1465,10 +1396,8 @@ static void usage(const char *argv0) {
             "PGM writes and private_frame_dump output to reduce desktop load.\n"
             "--image-ring-size=0 keeps unique filenames; positive values rotate\n"
             "through a fixed filename ring, intended for tmpfs live buffers.\n"
-            "Default startup uses the public stream/display setup known to enable\n"
-            "eye detection locally. --startup=tobiifree keeps the minimal\n"
-            "hello/realm/subscribe path for diagnostics.\n"
-            "--display-area=big applies the tobiifree collection plane\n"
+            "Default startup uses the native ET5 hello/realm/subscribe path.\n"
+            "--display-area=big applies the large collection plane\n"
             "TL=(-500,500,0), TR=(500,500,0), BL=(-500,0,0) after startup.\n"
             "--stream-disable also sends the Windows-observed 0x04ce disable\n"
             "request after each non-gaze subscription; diagnostic only.\n",
@@ -1481,8 +1410,7 @@ int main(int argc, char **argv) {
     const char *out_dir = DEFAULT_IMAGE_OUT;
     const char *events_path_arg = NULL;
     const char *streams_text = "0501,050e,1771";
-    const char *startup = "public";
-    const char *init_path = DEFAULT_INIT_FILE;
+    const char *startup = "native";
     const char *display_area = "none";
     double display_width_mm = 1000.0;
     double display_height_mm = 500.0;
@@ -1497,6 +1425,13 @@ int main(int argc, char **argv) {
     bool stream_disable = false;
     uint16_t streams[8];
     size_t stream_count = 0;
+    FILE *csv = NULL;
+    FILE *events = NULL;
+    libusb_context *ctx = NULL;
+    libusb_device_handle *handle = NULL;
+    bool interface_claimed = false;
+    bool session_open = false;
+    int exit_code = EXIT_FAILURE;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--label") == 0 && i + 1 < argc) {
@@ -1523,8 +1458,6 @@ int main(int argc, char **argv) {
             if (image_ring_size < 0) image_ring_size = 0;
         } else if (strcmp(argv[i], "--startup") == 0 && i + 1 < argc) {
             startup = argv[++i];
-        } else if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
-            init_path = argv[++i];
         } else if (strcmp(argv[i], "--display-area") == 0 && i + 1 < argc) {
             display_area = argv[++i];
         } else if (strcmp(argv[i], "--display-width-mm") == 0 && i + 1 < argc) {
@@ -1575,7 +1508,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    FILE *csv = fopen(csv_path_arg, "w");
+    csv = fopen(csv_path_arg, "w");
     if (csv == NULL) {
         perror(csv_path_arg);
         return EXIT_FAILURE;
@@ -1586,35 +1519,27 @@ int main(int argc, char **argv) {
     if (events_path_arg == NULL) {
         int written = snprintf(events_path, sizeof(events_path), "%s/events.csv", out_dir);
         if (written < 0 || (size_t)written >= sizeof(events_path)) {
-            fclose(csv);
-            return EXIT_FAILURE;
+            goto cleanup;
         }
         events_path_arg = events_path;
     }
-    FILE *events = fopen(events_path_arg, "w");
+    events = fopen(events_path_arg, "w");
     if (events == NULL) {
         perror(events_path_arg);
-        fclose(csv);
-        return EXIT_FAILURE;
+        goto cleanup;
     }
     fprintf(events,
             "elapsed_ms,monotonic_ns,kind,stream,index,device_ts,device_ts2,width,height,stride,bpp,payload_len,path\n");
 
-    libusb_context *ctx = NULL;
-    libusb_device_handle *handle = NULL;
     int err = libusb_init(&ctx);
     if (err != 0) {
         print_libusb_error("libusb_init", err);
-        fclose(csv);
-        return EXIT_FAILURE;
+        goto cleanup;
     }
     handle = libusb_open_device_with_vid_pid(ctx, TOBII_VID, TOBII_PID);
     if (handle == NULL) {
         fprintf(stderr, "device_not_found vid=0x%04x pid=0x%04x\n", TOBII_VID, TOBII_PID);
-        libusb_exit(ctx);
-        fclose(csv);
-        fclose(events);
-        return EXIT_FAILURE;
+        goto cleanup;
     }
 
     err = libusb_set_auto_detach_kernel_driver(handle, 1);
@@ -1625,72 +1550,33 @@ int main(int argc, char **argv) {
     err = libusb_claim_interface(handle, TOBII_VENDOR_IFACE);
     if (err != 0) {
         print_libusb_error("libusb_claim_interface interface 0", err);
-        libusb_close(handle);
-        libusb_exit(ctx);
-        fclose(csv);
-        fclose(events);
-        return EXIT_FAILURE;
+        goto cleanup;
     }
+    interface_claimed = true;
 
     err = libusb_control_transfer(handle, 0x41, 0x41, 0, 0, NULL, 0, 1000);
     if (err < 0) {
         print_libusb_error("session_open control 0x41", err);
-        libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-        libusb_close(handle);
-        libusb_exit(ctx);
-        fclose(csv);
-        fclose(events);
-        return EXIT_FAILURE;
+        goto cleanup;
     }
+    session_open = true;
     fprintf(stderr, "session_open=ok transferred=%d\n", err);
 
     struct parser parser = {0};
     uint32_t next_seq = 1;
-    if (strcmp(startup, "public") == 0) {
-        int command_count = 0;
-        err = send_public_init_sequence(handle, &parser, init_path, &command_count);
+    if (strcmp(startup, "native") == 0) {
+        err = run_native_handshake(handle, &parser, &next_seq);
         if (err != 0) {
-            libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
-            libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-            libusb_close(handle);
-            libusb_exit(ctx);
-            fclose(csv);
-            fclose(events);
-            return EXIT_FAILURE;
+            goto cleanup;
         }
-        fprintf(stderr, "startup=public init_commands=%d file=%s\n", command_count, init_path);
-        next_seq = (uint32_t)command_count;
-    } else if (strcmp(startup, "tobiifree") == 0) {
-        err = run_tobiifree_handshake(handle, &parser, &next_seq);
+        err = run_native_post_connect(handle, &parser, &next_seq);
         if (err != 0) {
-            libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
-            libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-            libusb_close(handle);
-            libusb_exit(ctx);
-            fclose(csv);
-            fclose(events);
-            return EXIT_FAILURE;
+            goto cleanup;
         }
-        err = run_tobiifree_post_connect(handle, &parser, &next_seq);
-        if (err != 0) {
-            libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
-            libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-            libusb_close(handle);
-            libusb_exit(ctx);
-            fclose(csv);
-            fclose(events);
-            return EXIT_FAILURE;
-        }
-        fprintf(stderr, "startup=tobiifree\n");
+        fprintf(stderr, "startup=native\n");
     } else {
         fprintf(stderr, "unknown startup mode: %s\n", startup);
-        libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
-        libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-        libusb_close(handle);
-        libusb_exit(ctx);
-        fclose(csv);
-        fclose(events);
-        return EXIT_FAILURE;
+        goto cleanup;
     }
 
     err = send_display_area_override(handle,
@@ -1703,13 +1589,7 @@ int main(int argc, char **argv) {
                                      display_origin_y_mm,
                                      display_z_mm);
     if (err != 0) {
-        libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
-        libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-        libusb_close(handle);
-        libusb_exit(ctx);
-        fclose(csv);
-        fclose(events);
-        return EXIT_FAILURE;
+        goto cleanup;
     }
     if (strcmp(display_area, "none") != 0) {
         next_seq++;
@@ -1719,24 +1599,12 @@ int main(int argc, char **argv) {
         if (streams[i] == STREAM_GAZE) continue;
         err = send_subscribe(handle, next_seq++, streams[i], "ttp_mux");
         if (err != 0) {
-            libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
-            libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-            libusb_close(handle);
-            libusb_exit(ctx);
-            fclose(csv);
-            fclose(events);
-            return EXIT_FAILURE;
+            goto cleanup;
         }
         if (stream_disable) {
             err = send_unsubscribe(handle, next_seq++, streams[i], "ttp_mux");
             if (err != 0) {
-                libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
-                libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-                libusb_close(handle);
-                libusb_exit(ctx);
-                fclose(csv);
-                fclose(events);
-                return EXIT_FAILURE;
+                goto cleanup;
             }
         }
     }
@@ -1760,6 +1628,7 @@ int main(int argc, char **argv) {
     int other_packets = 0;
     int errors = 0;
     int consecutive_timeouts = 0;
+    uint64_t next_file_flush_ns = start_ns + 1000000000ull;
 
     fprintf(stderr,
             "ttp_mux_start streams=%s gaze_csv=%s events_csv=%s out=%s\n",
@@ -1830,9 +1699,13 @@ int main(int argc, char **argv) {
                             image.bpp,
                             image.payload_len,
                             frame_path);
-                    fflush(events);
                     printf("private_frame_dump path=%s\n", frame_path);
-                    fflush(stdout);
+                    if (now_ns >= next_file_flush_ns) {
+                        fflush(events);
+                        fflush(csv);
+                        fflush(stdout);
+                        next_file_flush_ns = now_ns + 1000000000ull;
+                    }
                 }
             }
             continue;
@@ -1852,7 +1725,11 @@ int main(int argc, char **argv) {
                         (unsigned long long)sync.timestamp,
                         (unsigned long long)sync.receive_timestamp,
                         frame.plen);
-                fflush(events);
+                if (now_ns >= next_file_flush_ns) {
+                    fflush(events);
+                    fflush(csv);
+                    next_file_flush_ns = now_ns + 1000000000ull;
+                }
             }
             continue;
         }
@@ -1871,7 +1748,11 @@ int main(int argc, char **argv) {
                             index,
                             frame.plen,
                             payload_path);
-                    fflush(events);
+                    if (now_ns >= next_file_flush_ns) {
+                        fflush(events);
+                        fflush(csv);
+                        next_file_flush_ns = now_ns + 1000000000ull;
+                    }
                 }
             }
             continue;
@@ -1887,7 +1768,11 @@ int main(int argc, char **argv) {
         if (sample.eye_present_r == 1) right_eye_present_packets++;
         write_csv_sample(csv, label, start_ns, now_ns, decoded_packets, &frame, &sample);
         decoded_packets++;
-        fflush(csv);
+        if (now_ns >= next_file_flush_ns) {
+            fflush(csv);
+            fflush(events);
+            next_file_flush_ns = now_ns + 1000000000ull;
+        }
     }
 
     fprintf(stderr,
@@ -1910,12 +1795,28 @@ int main(int argc, char **argv) {
             other_packets,
             errors);
 
-    libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
-    libusb_release_interface(handle, TOBII_VENDOR_IFACE);
-    libusb_close(handle);
-    libusb_exit(ctx);
-    fclose(csv);
-    fclose(events);
+    exit_code = errors == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 
-    return errors == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+cleanup:
+    if (session_open && handle != NULL) {
+        libusb_control_transfer(handle, 0x41, 0x42, 0, 0, NULL, 0, 500);
+    }
+    if (interface_claimed && handle != NULL) {
+        libusb_release_interface(handle, TOBII_VENDOR_IFACE);
+    }
+    if (handle != NULL) {
+        libusb_close(handle);
+    }
+    if (ctx != NULL) {
+        libusb_exit(ctx);
+    }
+    if (csv != NULL) {
+        fflush(csv);
+        fclose(csv);
+    }
+    if (events != NULL) {
+        fflush(events);
+        fclose(events);
+    }
+    return exit_code;
 }

@@ -3,6 +3,7 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root_dir"
+source "$root_dir/scripts/app/sc-bin64.sh"
 
 app_name="Tobii Dashboard"
 desktop_id="tobii-dashboard.desktop"
@@ -256,16 +257,7 @@ EOF
 }
 
 find_sc_bin64() {
-  local prefix="${STAR_CITIZEN_PREFIX:-$HOME/Games/star-citizen}"
-  if [[ -n "${SC_BIN64:-}" && -d "${SC_BIN64:-}" ]]; then
-    printf '%s\n' "$SC_BIN64"
-    return 0
-  fi
-  if [[ -d "$prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Bin64" ]]; then
-    printf '%s\n' "$prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Bin64"
-    return 0
-  fi
-  find "$HOME/Games" -path '*/StarCitizen/*/Bin64' -type d 2>/dev/null | sort | tail -1
+  sc_find_bin64
 }
 
 report_sc_detection() {

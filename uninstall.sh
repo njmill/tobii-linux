@@ -160,6 +160,26 @@ reload_udev() {
   fi
 }
 
+kill_pidfile() {
+  local file="$1"
+  local pid=""
+  [[ -f "$file" ]] || return 0
+  pid="$(cat "$file" 2>/dev/null || true)"
+  rm -f "$file"
+  [[ -n "$pid" ]] || return 0
+  [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && return 0
+  kill "$pid" 2>/dev/null || true
+}
+
+stop_runtime_helpers() {
+  local pid_dir="$root_dir/.tmp/sc-tobii-native-runtime/pids"
+  local name
+  [[ -d "$pid_dir" ]] || return 0
+  for name in dashboard mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
+    kill_pidfile "$pid_dir/$name.pid"
+  done
+}
+
 print_plan() {
   local pm="$1"
   log "Uninstall preflight report"
@@ -198,10 +218,7 @@ if [[ "$dry_run" -eq 1 ]]; then
 fi
 
 log "Stopping local Tobii runtime processes"
-pkill -f "$root_dir/scripts/recon/eye-pose-dashboard.py" 2>/dev/null || true
-pkill -f "$root_dir/build/tobii-ttp-mux" 2>/dev/null || true
-pkill -f "$root_dir/scripts/app/tobii-middleware-spy.py" 2>/dev/null || true
-pkill -f "tobii-middleware-pipe-spy.exe" 2>/dev/null || true
+stop_runtime_helpers
 
 log "Removing application launcher"
 rm_path "$desktop_path"

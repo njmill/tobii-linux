@@ -5,6 +5,7 @@ prefix="${STAR_CITIZEN_PREFIX:-$HOME/Games/star-citizen}"
 launch_script="${STAR_CITIZEN_LAUNCH_SCRIPT:-$prefix/sc-launch.sh}"
 tobii_begin="# tobii-linux-native-tobii-hook begin"
 tobii_end="# tobii-linux-native-tobii-hook end"
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 if [[ ! -f "$launch_script" ]]; then
   echo "error: launch script not found: $launch_script" >&2
@@ -30,9 +31,17 @@ awk -v begin="$tobii_begin" -v end="$tobii_end" '
 mv "$tmp" "$launch_script"
 chmod +x "$launch_script"
 
-pkill -f "run-sc-tobii-native-runtime.sh services" 2>/dev/null || true
-pkill -f "tobii-middleware-spy.py.*--port 4455" 2>/dev/null || true
-pkill -f "tobii-middleware-pipe-spy.exe" 2>/dev/null || true
+pid_dir="$root_dir/.tmp/sc-tobii-native-runtime/pids"
+if [[ -d "$pid_dir" ]]; then
+  for name in dashboard mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
+    pid_file="$pid_dir/$name.pid"
+    [[ -f "$pid_file" ]] || continue
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    rm -f "$pid_file"
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+  done
+fi
 
 echo "disabled native Tobii launch hook"
 echo "launch_script=$launch_script"

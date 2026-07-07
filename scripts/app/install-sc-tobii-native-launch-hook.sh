@@ -43,7 +43,7 @@ awk -v root="$root_dir" \
       print ""
       print tobii_begin
       print "mkdir -p \"$(dirname " hook_log ")\""
-      print "if pgrep -f \"run-sc-tobii-native-runtime.sh services\" >/dev/null 2>&1; then"
+      print "if test -s \"" root "/.tmp/sc-tobii-native-runtime/pids/runtime-services.pid\" && kill -0 \"$(cat \"" root "/.tmp/sc-tobii-native-runtime/pids/runtime-services.pid\")\" >/dev/null 2>&1; then"
       print "  echo \"native Tobii services already running\" >>\"" hook_log "\""
       print "else"
       print "  (cd \"" root "\" && SC_POC_KEEP_EXISTING_CAPTURE=1 SC_TOBII_TTP_CAPABILITY_MODE=\"" capability_mode "\" SC_TOBII_TTP_UNSOLICITED_PRESENCE=\"" unsolicited_presence "\" make sc-tobii-stock-runtime-services >>\"" hook_log "\" 2>&1 &) || true"

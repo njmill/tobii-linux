@@ -33,19 +33,38 @@ fi
 wine_bin="${wine_bin:-wine}"
 
 mkdir -p "$work_dir" "$stock_dir"
+pid_dir="$work_dir/pids"
+mkdir -p "$pid_dir"
 
 if [[ "${SC_TOBII_STOCK_DLL_PREFLIGHT:-1}" == "1" ]]; then
   "$root_dir/scripts/app/check-sc-stock-tobii-dll.sh"
 fi
 
-kill_matching_except_self() {
-  local pattern="$1"
-  local pid
-  while read -r pid; do
-    [[ -z "$pid" ]] && continue
-    [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && continue
+write_pidfile() {
+  local name="$1"
+  local pid="$2"
+  printf '%s\n' "$pid" >"$pid_dir/$name.pid"
+}
+
+kill_pidfile() {
+  local name="$1"
+  local file="$pid_dir/$name.pid"
+  local pid=""
+  [[ -f "$file" ]] || return 0
+  pid="$(cat "$file" 2>/dev/null || true)"
+  rm -f "$file"
+  [[ -n "$pid" ]] || return 0
+  [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && return 0
+  if kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
-  done < <(pgrep -f "$pattern" 2>/dev/null || true)
+  fi
+}
+
+kill_runtime_pidfiles() {
+  local name
+  for name in dashboard mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
+    kill_pidfile "$name"
+  done
 }
 
 kill_tcp_port_listeners_except_self() {
@@ -91,9 +110,9 @@ restart_services_or_exit() {
 }
 
 if [[ "$mode" == "services" ]]; then
-  kill_matching_except_self "run-sc-tobii-native-runtime.sh services"
-  pkill -f "$root_dir/scripts/app/tobii-middleware-spy.py.*--port $middleware_port" 2>/dev/null || true
-  pkill -f "tobii-middleware-pipe-spy.exe" 2>/dev/null || true
+  write_pidfile runtime-services "$$"
+  kill_runtime_pidfiles
+  write_pidfile runtime-services "$$"
   kill_tcp_port_listeners_except_self "$middleware_port"
   if ! wait_tcp_port_free "$middleware_port" 20; then
     echo "warning: TCP middleware port $middleware_port still busy after graceful cleanup; forcing listeners down" >&2
@@ -123,12 +142,7 @@ fi
 : >"$work_dir/tobiiprp-prefixed-pipe-spy.stdout"
 
 if [[ "${SC_POC_KEEP_EXISTING_CAPTURE:-0}" != "1" ]]; then
-  kill_matching_except_self "run-sc-tobii-native-runtime.sh services"
-  pkill -f "$root_dir/scripts/recon/eye-pose-dashboard.py" 2>/dev/null || true
-  pkill -f "$root_dir/build/tobii-ttp-mux" 2>/dev/null || true
-  pkill -f "$root_dir/build/tobii-gaze-native" 2>/dev/null || true
-  pkill -f "tobii-middleware-pipe-spy.exe" 2>/dev/null || true
-  pkill -f "tobii-middleware-spy.py.*--port $middleware_port" 2>/dev/null || true
+  kill_runtime_pidfiles
   sleep 0.3
 fi
 
@@ -174,6 +188,7 @@ fi
   ${SC_TOBII_TTP_UNSOLICITED_PRESENCE:+--unsolicited-presence-after-discovery} \
   >"$work_dir/middleware-spy.stdout" 2>&1 &
 middleware_pid=$!
+write_pidfile middleware "$middleware_pid"
 dashboard_pid=""
 etdefault_pid=""
 tobii_prefixed_pid=""
@@ -194,6 +209,9 @@ pipe_args=(
 if [[ "${SC_TOBII_SESP_PROVIDER_NUDGE:-0}" == "1" ]]; then
   pipe_args+=(--sesp-provider-nudge)
 fi
+if [[ "${SC_TOBII_PIPE_SUFFIX_SCAN:-0}" == "1" ]]; then
+  pipe_args+=(--client-pipe-suffix-scan)
+fi
 
 echo "starting Tobii SESP pipe emulator; live headpose UDP 127.0.0.1:$tobii_udp_port"
 (
@@ -204,6 +222,7 @@ echo "starting Tobii SESP pipe emulator; live headpose UDP 127.0.0.1:$tobii_udp_
     "$wine_bin" "$stock_dir/tobii-middleware-pipe-spy.exe" "${pipe_args[@]}"
 ) >"$work_dir/middleware-pipe-spy.stdout" 2>&1 &
 pipe_pid=$!
+write_pidfile pipe "$pipe_pid"
 
 if [[ "${SC_TOBII_ETDEFAULTPIPE:-1}" == "1" ]]; then
   echo "starting Tobii ETDefaultPIPE discovery emulator; entry=${SC_TOBII_ETDEFAULT_ENTRY:-127.0.0.1}"
@@ -220,6 +239,7 @@ if [[ "${SC_TOBII_ETDEFAULTPIPE:-1}" == "1" ]]; then
         --etdefault-entry "${SC_TOBII_ETDEFAULT_ENTRY:-127.0.0.1}"
   ) >"$work_dir/etdefaultpipe-spy.stdout" 2>&1 &
   etdefault_pid=$!
+  write_pidfile etdefaultpipe "$etdefault_pid"
 fi
 
 if [[ "${SC_TOBII_PREFIXED_PIPE:-1}" == "1" ]]; then
@@ -235,6 +255,7 @@ if [[ "${SC_TOBII_PREFIXED_PIPE:-1}" == "1" ]]; then
         --pipe "\\\\.\\pipe\\TOBII-${SC_TOBII_PREFIXED_ENTRY:-127.0.0.1}"
   ) >"$work_dir/tobii-prefixed-pipe-spy.stdout" 2>&1 &
   tobii_prefixed_pid=$!
+  write_pidfile tobii-prefixed-pipe "$tobii_prefixed_pid"
 fi
 
 if [[ "${SC_TOBII_PRP_PREFIXED_PIPE:-1}" == "1" ]]; then
@@ -250,13 +271,13 @@ if [[ "${SC_TOBII_PRP_PREFIXED_PIPE:-1}" == "1" ]]; then
         --pipe "\\\\.\\pipe\\TOBIIPRP-${SC_TOBII_PRP_PREFIXED_ENTRY:-IS5FF-100203612152}"
   ) >"$work_dir/tobiiprp-prefixed-pipe-spy.stdout" 2>&1 &
   tobiiprp_prefixed_pid=$!
+  write_pidfile tobiiprp-prefixed-pipe "$tobiiprp_prefixed_pid"
 fi
 
 cleanup() {
   if [[ -n "$dashboard_pid" ]]; then
     kill "$dashboard_pid" 2>/dev/null || true
   fi
-  pkill -P "$$" 2>/dev/null || true
   if [[ -n "$etdefault_pid" ]]; then
     kill "$etdefault_pid" 2>/dev/null || true
   fi
@@ -280,6 +301,17 @@ cleanup() {
   fi
   if [[ -n "$tobiiprp_prefixed_pid" ]]; then
     wait "$tobiiprp_prefixed_pid" 2>/dev/null || true
+  fi
+  rm -f \
+    "$pid_dir/dashboard.pid" \
+    "$pid_dir/mux.pid" \
+    "$pid_dir/middleware.pid" \
+    "$pid_dir/pipe.pid" \
+    "$pid_dir/etdefaultpipe.pid" \
+    "$pid_dir/tobii-prefixed-pipe.pid" \
+    "$pid_dir/tobiiprp-prefixed-pipe.pid"
+  if [[ "$mode" == "services" ]]; then
+    rm -f "$pid_dir/runtime-services.pid"
   fi
 }
 trap cleanup EXIT
@@ -393,11 +425,13 @@ case "$mode" in
   dashboard)
     "$root_dir/scripts/recon/eye-pose-dashboard.py" "${common_args[@]}" &
     dashboard_pid=$!
+    write_pidfile dashboard "$dashboard_pid"
     wait "$dashboard_pid"
     ;;
   headless)
     "$root_dir/scripts/recon/eye-pose-dashboard.py" --headless "${common_args[@]}" &
     dashboard_pid=$!
+    write_pidfile dashboard "$dashboard_pid"
     wait "$dashboard_pid"
     ;;
   *)

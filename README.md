@@ -9,10 +9,6 @@ This public tree contains the current working runtime path:
 - Stock Star Citizen Tobii DLL compatibility services.
 - Live head pose and gaze delivery into Star Citizen's native Tobii mode.
 
-The important bit: the normal runtime does not replace
-`tobii_gameintegration_x64.dll` in Star Citizen and does not inject into the
-game process.
-
 ## Current Scope
 
 This is an early public POC. It is focused on one working path:
@@ -25,10 +21,6 @@ Tobii ET5 USB
   -> stock Star Citizen Tobii DLL
   -> Star Citizen Tobii head tracking and gaze targeting
 ```
-
-The research repository contains many exploratory probes and reverse
-engineering artifacts. This repository intentionally keeps only the runtime and
-the docs needed to run, debug, and polish the current system.
 
 ## Install With Installer
 
@@ -86,6 +78,13 @@ To preview removal without changing anything:
 ```bash
 ./uninstall.sh --preflight
 ```
+
+Advanced installer/runtime environment:
+
+- `MEDIAPIPE_UV_VERSION` controls the pinned `uv` release used only when the
+  installer needs to bootstrap a local Python for MediaPipe.
+- `SC_TOBII_PIPE_SUFFIX_SCAN=1` enables a diagnostic Wine named-pipe fallback
+  used during protocol debugging. It is off by default for normal runtime use.
 
 ## Manual Install
 
@@ -169,3 +168,10 @@ pose delivery.
 - [Runtime architecture](docs/integrations/star-citizen-stock-tobii-runtime-architecture.md)
 - [Stock runtime diagram](docs/diagrams/star-citizen-stock-tobii-runtime.puml)
 - [Stock DLL discovery notes](docs/recon/star-citizen-stock-dll-discovery.md)
+
+## Acknowledgements
+
+Several open source projects and community experiments around Tobii Eye Tracker 5 protocol decoding were very helpful in getting this up and running. Those include:
+
+- [tobii_eye_tracker_linux_installer](https://github.com/megagtrwrath/tobii_eye_tracker_linux_installer)
+- [opentrack](https://github.com/megagtrwrath/opentrack)

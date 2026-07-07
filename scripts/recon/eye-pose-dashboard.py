@@ -3335,6 +3335,16 @@ def build_hq_frame_worker(root_dir: Path, skip_build: bool) -> None:
         subprocess.run(["make", "build/tobii-uvc-probe"], cwd=root_dir, check=True)
 
 
+def write_runtime_pidfile(root_dir: Path, name: str, pid: int) -> None:
+    runtime_dir = Path(os.environ.get("SC_TOBII_NATIVE_RUNTIME_DIR", root_dir / ".tmp" / "sc-tobii-native-runtime"))
+    pid_dir = runtime_dir / "pids"
+    try:
+        pid_dir.mkdir(parents=True, exist_ok=True)
+        (pid_dir / f"{name}.pid").write_text(f"{pid}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def load_tuning(args: argparse.Namespace) -> None:
     tuning_file = getattr(args, "tuning_file", None)
     if tuning_file is None or not tuning_file.exists():
@@ -3387,7 +3397,7 @@ def main() -> int:
     parser.add_argument("--fullscreen", action="store_true", help="Run fullscreen.")
     parser.add_argument("--headless", action="store_true", help="Run the bridge without showing the dashboard window.")
     parser.add_argument("--skip-build", action="store_true")
-    parser.add_argument("--startup", choices=("public", "tobiifree"), default="tobiifree")
+    parser.add_argument("--startup", choices=("native",), default="native")
     parser.add_argument("--display-area", choices=("none", "big", "rect"), default="big")
     parser.add_argument("--sensor-distance-mm", type=float, default=25.0 * 25.4, help="Natural seated distance from sensor. Default is 25 inches.")
     parser.add_argument("--baseline-samples", type=int, default=36)
@@ -3592,6 +3602,7 @@ def main() -> int:
         start_new_session=True,
     )
     log_file.close()
+    write_runtime_pidfile(root_dir, "mux", proc.pid)
     if mediapipe_bridge is not None and proc.stdout is not None:
         mediapipe_bridge.attach_mux_stdout(proc.stdout)
 

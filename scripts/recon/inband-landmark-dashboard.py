@@ -1235,7 +1235,7 @@ def main() -> int:
     parser.add_argument("--session", type=Path, help="Session directory. Defaults to /dev/shm/tobii-linux/inband-landmark-dashboard.")
     parser.add_argument("--no-start-mux", action="store_true", help="Display an already-running session instead of launching tobii-ttp-mux.")
     parser.add_argument("--seconds", type=float, default=3600.0)
-    parser.add_argument("--startup", choices=("public", "tobiifree"), default="tobiifree")
+    parser.add_argument("--startup", choices=("native",), default="native")
     parser.add_argument("--display-area", choices=("none", "big", "rect"), default="big")
     parser.add_argument("--image-write-hz", type=float, default=12.0)
     parser.add_argument("--image-ring-size", type=int, default=96)
