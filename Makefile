@@ -3,7 +3,7 @@
 	sc-tobii-stock-runtime-dashboard sc-tobii-stock-runtime-headless \
 	sc-tobii-stock-runtime-status sc-tobii-stock-runtime-clear-logs \
 	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight sc-tobii-stock-install-launch-hook \
-	sc-tobii-stock-disable-launch-hook \
+	sc-tobii-stock-disable-launch-hook sc-tobii-stock-window-probe wine-window-probe-build \
 	mediapipe-python mediapipe-venv mediapipe-fetch-model \
 	install-launch-hook disable-launch-hook install-udev-rule clean
 
@@ -29,6 +29,15 @@ build/tobii-ttp-mux: tools/probes/tobii-ttp-mux.c
 $(SC_TOBII_STOCK_RECON_DIR)/tobii-middleware-pipe-spy.exe: tools/app/tobii-middleware-pipe-spy.c
 	mkdir -p "$(SC_TOBII_STOCK_RECON_DIR)"
 	$(MINGW64_CC) -O2 -Wall -Wextra -o "$@" "$<" -lws2_32
+
+$(SC_TOBII_STOCK_RECON_DIR)/wine-window-probe.exe: tools/app/wine-window-probe.c
+	mkdir -p "$(SC_TOBII_STOCK_RECON_DIR)"
+	$(MINGW64_CC) -O2 -Wall -Wextra -o "$@" "$<"
+
+wine-window-probe-build: $(SC_TOBII_STOCK_RECON_DIR)/wine-window-probe.exe
+
+sc-tobii-stock-window-probe: wine-window-probe-build
+	./scripts/app/run-wine-window-probe.sh
 
 mediapipe-python:
 	./scripts/recon/setup-mediapipe-python.sh

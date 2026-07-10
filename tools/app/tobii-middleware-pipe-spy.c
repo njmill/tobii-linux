@@ -334,7 +334,11 @@ static void drain_service_pipe(HANDLE pipe)
                 ++name_len;
             if (name_len < name_room) {
                 registered_channel = read_le32(buf);
-                snprintf(registered_client_name, sizeof(registered_client_name), "%s", client_name);
+                size_t copy_len = name_len;
+                if (copy_len >= sizeof(registered_client_name))
+                    copy_len = sizeof(registered_client_name) - 1;
+                memcpy(registered_client_name, client_name, copy_len);
+                registered_client_name[copy_len] = '\0';
                 log_line(
                     "service_pipe_register channel=0x%04lx client_name=%s extra_bytes=%lu",
                     (unsigned long)registered_channel,
@@ -1247,11 +1251,11 @@ static int connect_client_pipe(HANDLE service_pipe)
     drain_service_pipe(service_pipe);
     uint32_t channel = registered_channel;
     char client_name[MAX_PATH];
-    snprintf(client_name, sizeof(client_name), "%s", registered_client_name);
+    snprintf(client_name, sizeof(client_name), "%.*s", (int)(sizeof(client_name) - 1), registered_client_name);
 
     if (client_name[0]) {
-        char name[MAX_PATH];
-        snprintf(name, sizeof(name), "\\\\.\\pipe\\%s", client_name);
+        char name[sizeof("\\\\.\\pipe\\") + MAX_PATH];
+        snprintf(name, sizeof(name), "\\\\.\\pipe\\%.*s", (int)(sizeof(client_name) - 1), client_name);
         HANDLE client = CreateFileA(
             name,
             GENERIC_WRITE,
@@ -1351,8 +1355,8 @@ static int connect_client_pipe(HANDLE service_pipe)
             if (strncmp(file_name, "client_streamengineservices_", 28) != 0)
                 continue;
 
-            char name[MAX_PATH];
-            snprintf(name, sizeof(name), "\\\\.\\pipe\\%s", file_name);
+            char name[sizeof("\\\\.\\pipe\\") + MAX_PATH];
+            snprintf(name, sizeof(name), "\\\\.\\pipe\\%.*s", (int)(sizeof(file_name) - 1), file_name);
             log_line("client_pipe_candidate name=%s", name);
 
             HANDLE client = CreateFileA(
