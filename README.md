@@ -41,6 +41,10 @@ The installer handles the setup work for you:
 - Searches common Star Citizen Wine/Lutris/Bottles/Heroic/Steam locations,
   saves the detected runtime path, and checks that its Tobii DLL is stock when
   possible.
+- Installs the Star Citizen launch hook when a compatible `sc-launch.sh` is
+  detected.
+- Runs setup diagnostics at the end so you can see what is ready and what still
+  needs attention.
 
 Installer options:
 
@@ -50,10 +54,12 @@ Installer options:
 ./install.sh --no-udev              # skip USB permission rule install
 ./install.sh --no-desktop           # skip menu entry creation
 ./install.sh --no-sc-check          # skip Star Citizen stock DLL safety check
+./install.sh --no-launch-hook       # skip Star Citizen launch hook install
 ```
 
-After installation, replug the Tobii device or reboot if device permissions do
-not update immediately. Then open `Tobii Dashboard` from your application menu.
+After installation, review the diagnostics printed by the installer. Replug the
+Tobii device or reboot if device permissions do not update immediately. Then
+open `Tobii Dashboard` from your application menu.
 
 On first launch, the dashboard guides you through screen calibration and gaze
 calibration.
@@ -75,6 +81,12 @@ The installer writes the detected path to:
 ```
 
 The menu launcher and `make runtime` load that file automatically.
+
+You can rerun setup diagnostics at any time:
+
+```bash
+make diag
+```
 
 To remove generated files and the application-menu entry:
 
@@ -114,7 +126,7 @@ Install system packages:
 
 ```bash
 sudo apt install build-essential make pkg-config libusb-1.0-0-dev libssl-dev \
-  mingw-w64 wine python3-tk curl
+  mingw-w64 wine python3-tk python3-venv curl tar ca-certificates usbutils
 ```
 
 MediaPipe requires Python 3.11 or 3.12. If your distro Python is newer, use the
@@ -170,6 +182,53 @@ A healthy run should show the stock Tobii DLL loaded, runtime metadata reached,
 presence/gaze subscriptions, live gaze packets, SESP pipe attach, and live head
 pose delivery.
 
+## Troubleshooting Setup
+
+If the Tobii lights do not turn on or the dashboard reports:
+
+```text
+device_not_found vid=0x2104 pid=0x0313
+```
+
+run:
+
+```bash
+make diag
+```
+
+Check the `tobii usb`, `udev rule`, and `libusb open` lines. If the udev rule
+was just installed, replug the Tobii device or reboot. The shipped udev rule no
+longer depends on the `plugdev` group, which is missing on many Arch/Fedora
+systems.
+
+If the dashboard works but Star Citizen does not receive head/gaze data, start
+the game and then run:
+
+```bash
+make status
+```
+
+If the status output says the launch hook is missing or `sc-launch.sh` runs
+`wineserver -k`, run:
+
+```bash
+make install-launch-hook
+```
+
+If Star Citizen uses a custom Lutris/Heroic/Proton/Wine runner and the runtime
+does not find it automatically, set:
+
+```bash
+export STAR_CITIZEN_WINE="/path/to/the/wine/binary/used/by/StarCitizen"
+```
+
+If Star Citizen is installed in a custom location, quote paths with spaces and
+do not backslash spaces inside quotes:
+
+```bash
+SC_BIN64="/path/with spaces/StarCitizen/LIVE/Bin64" ./install.sh
+```
+
 ## Useful Targets
 
 - `make runtime` starts services plus dashboard.
@@ -177,6 +236,7 @@ pose delivery.
 - `make services` starts only the Wine-visible Tobii compatibility services.
 - `make dashboard` starts only the Linux dashboard/data producer.
 - `make status` analyzes runtime logs.
+- `make diag` checks setup, USB permissions, Star Citizen detection, and launch hook state.
 - `make clear-logs` clears runtime logs.
 - `make preflight` verifies Star Citizen is using the stock Tobii DLL.
 - `make install-launch-hook` installs the helper launch hook.

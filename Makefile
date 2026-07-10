@@ -5,7 +5,7 @@
 	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight sc-tobii-stock-install-launch-hook \
 	sc-tobii-stock-disable-launch-hook sc-tobii-stock-window-probe wine-window-probe-build \
 	mediapipe-python mediapipe-venv mediapipe-fetch-model \
-	install-launch-hook disable-launch-hook install-udev-rule clean
+	install-launch-hook disable-launch-hook install-udev-rule diag clean
 
 CC ?= cc
 MINGW64_CC ?= x86_64-w64-mingw32-gcc
@@ -96,6 +96,9 @@ status:
 
 sc-tobii-stock-runtime-status: status
 
+diag:
+	./scripts/app/tobii-diag.sh
+
 clear-logs:
 	./scripts/app/clear-sc-tobii-runtime-logs.sh
 
@@ -118,6 +121,7 @@ install-udev-rule:
 	sudo udevadm control --reload-rules
 	sudo udevadm trigger
 	@echo "udev rule installed. Replug the Tobii device or reboot if permissions do not update."
+	@echo "run 'make diag' to verify USB visibility and libusb access."
 
 clean:
 	rm -rf build
