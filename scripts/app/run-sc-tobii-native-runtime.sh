@@ -114,6 +114,23 @@ kill_pidfile() {
   fi
 }
 
+kill_runtime_supervisor_for_pid() {
+  local pid="$1"
+  local parent=""
+  local cmd=""
+  while [[ -n "$pid" && "$pid" != "1" ]]; do
+    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    [[ -n "$parent" ]] || return 0
+    [[ "$parent" == "$$" || "$parent" == "$BASHPID" || "$parent" == "$PPID" ]] && return 0
+    cmd="$(ps -o args= -p "$parent" 2>/dev/null || true)"
+    if [[ "$cmd" == *"run-sc-tobii-native-runtime.sh services"* ]]; then
+      kill "$parent" 2>/dev/null || true
+      return 0
+    fi
+    pid="$parent"
+  done
+}
+
 kill_runtime_pidfiles() {
   local name
   for name in dashboard mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
@@ -127,9 +144,25 @@ kill_tcp_port_listeners_except_self() {
   while read -r pid; do
     [[ -z "$pid" ]] && continue
     [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && continue
+    kill_runtime_supervisor_for_pid "$pid"
     kill "$pid" 2>/dev/null || true
   done < <(
     ss -H -ltnp "sport = :$port" 2>/dev/null \
+      | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+      | sort -u
+  )
+}
+
+kill_udp_port_listeners_except_self() {
+  local port="$1"
+  local pid
+  while read -r pid; do
+    [[ -z "$pid" ]] && continue
+    [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && continue
+    kill_runtime_supervisor_for_pid "$pid"
+    kill "$pid" 2>/dev/null || true
+  done < <(
+    ss -H -lunp "sport = :$port" 2>/dev/null \
       | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
       | sort -u
   )
@@ -156,6 +189,7 @@ cleanup_tcp_port_listener() {
     while read -r pid; do
       [[ -z "$pid" ]] && continue
       [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && continue
+      kill_runtime_supervisor_for_pid "$pid"
       kill -9 "$pid" 2>/dev/null || true
     done < <(
       ss -H -ltnp "sport = :$port" 2>/dev/null \
@@ -163,6 +197,38 @@ cleanup_tcp_port_listener() {
         | sort -u
     )
     wait_tcp_port_free "$port" 10 || true
+  fi
+}
+
+wait_udp_port_free() {
+  local port="$1"
+  local tries="${2:-20}"
+  local i
+  for ((i = 0; i < tries; ++i)); do
+    if ! ss -H -lunp "sport = :$port" 2>/dev/null | grep -q .; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+cleanup_udp_port_listener() {
+  local port="$1"
+  kill_udp_port_listeners_except_self "$port"
+  if ! wait_udp_port_free "$port" 20; then
+    echo "warning: UDP pose port $port still busy after graceful cleanup; forcing listeners down" >&2
+    while read -r pid; do
+      [[ -z "$pid" ]] && continue
+      [[ "$pid" == "$$" || "$pid" == "$BASHPID" || "$pid" == "$PPID" ]] && continue
+      kill_runtime_supervisor_for_pid "$pid"
+      kill -9 "$pid" 2>/dev/null || true
+    done < <(
+      ss -H -lunp "sport = :$port" 2>/dev/null \
+        | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+        | sort -u
+    )
+    wait_udp_port_free "$port" 10 || true
   fi
 }
 
@@ -186,6 +252,7 @@ if [[ "$mode" == "services" ]]; then
   kill_runtime_pidfiles
   write_pidfile runtime-services "$$"
   cleanup_tcp_port_listener "$middleware_port"
+  cleanup_udp_port_listener "$tobii_udp_port"
   sleep 0.2
 fi
 
@@ -203,6 +270,7 @@ fi
 if [[ "${SC_POC_KEEP_EXISTING_CAPTURE:-0}" != "1" ]]; then
   kill_runtime_pidfiles
   cleanup_tcp_port_listener "$middleware_port"
+  cleanup_udp_port_listener "$tobii_udp_port"
   sleep 0.3
 fi
 

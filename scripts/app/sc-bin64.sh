@@ -24,6 +24,7 @@ sc_load_config() {
   [[ -n "$explicit_sc_bin64" ]] && SC_BIN64="$explicit_sc_bin64"
   [[ -n "$explicit_prefix" ]] && STAR_CITIZEN_PREFIX="$explicit_prefix"
   [[ -n "$explicit_wine" ]] && STAR_CITIZEN_WINE="$explicit_wine"
+  return 0
 }
 
 sc_prefix_from_bin64() {
