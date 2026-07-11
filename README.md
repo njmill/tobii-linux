@@ -215,6 +215,12 @@ If the status output says the launch hook is missing or `sc-launch.sh` runs
 make install-launch-hook
 ```
 
+If `make diag` says the launch hook is installed but `make status` reports
+`SC launch hook execution: lines=0`, Star Citizen is probably being launched
+through a different script than the one the installer patched. Launch through
+the patched `sc-launch.sh`, or set `STAR_CITIZEN_LAUNCH_SCRIPT` to the script
+your launcher actually runs and then rerun `make install-launch-hook`.
+
 If Star Citizen uses a custom Lutris/Heroic/Proton/Wine runner and the runtime
 does not find it automatically, set:
 
