@@ -13,7 +13,7 @@ node "Linux host" as Linux {
   component "eye-pose-dashboard.py\nruntime UI + calibration + tuning" as Dashboard
   component "MediaPipe Face Landmarker\nPython 3.11/3.12 venv worker" as MediaPipe
   artifact ".tmp/sc-tobii-native-runtime/sc-tuning.json\nquick tuning" as Tuning
-  artifact ".tmp/sc-tobii-native-runtime/sc-head-calibration.json\nhead calibration" as HeadCal
+  artifact ".tmp/sc-tobii-native-runtime/native-head-position.json\npersonal head-position profile" as HeadCal
   artifact ".tmp/sc-tobii-native-runtime/sc-window.json\nwindow geometry" as WindowState
 }
 
@@ -42,7 +42,6 @@ MediaPipe --> Dashboard : face landmarks\npose + confidence + latency
 
 Dashboard --> Tuning : save slider changes
 Tuning --> Dashboard : restore on launch
-Dashboard --> HeadCal : save head calibration
 HeadCal --> Dashboard : restore on launch
 Dashboard --> WindowState : save size/position
 WindowState --> Dashboard : restore on launch
@@ -84,7 +83,9 @@ end note
 
 note bottom of Dashboard
 Dashboard pose and gaze are independent:
-head pose is smoothed/tuned for cockpit camera,
+head position uses native eyes + rotation compensation
+when a personal profile is available; missing pairs hold.
+Head pose is smoothed/tuned for cockpit camera,
 gaze remains responsive for target selection.
 end note
 

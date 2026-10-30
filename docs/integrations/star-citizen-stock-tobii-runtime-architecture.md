@@ -14,6 +14,8 @@ services that the stock DLL expects to discover.
 See also:
 
 - [Stock runtime diagram](../diagrams/star-citizen-stock-tobii-runtime.puml)
+- [Component inventory](component-inventory.md)
+- [Native eye position and rotation compensation](native-head-position.md)
 - [Stock DLL discovery notes](../recon/star-citizen-stock-dll-discovery.md)
 
 ## High-Level Data Flow
@@ -67,8 +69,21 @@ It is responsible for:
 - Computing and tuning head pose.
 - Calibrating and displaying gaze.
 - Persisting quick tuning in `.tmp/sc-tobii-native-runtime/sc-tuning.json`.
-- Persisting head calibration in `.tmp/sc-tobii-native-runtime/sc-head-calibration.json`.
+- Loading a personal native head-position profile from `.tmp/sc-tobii-native-runtime/native-head-position.json` when available.
 - Sending live UDP packets to the middleware services.
+
+With a validated personal profile, `native_head_position.py` combines binocular
+Tobii eye origins with time-matched MediaPipe rotation to compensate for the eye
+midpoint's rotation arc. It holds the whole corrected position when a valid pair
+is unavailable. Without a profile, translation follows native eye origins.
+MediaPipe supplies head rotation; its estimated translation is not used by the
+native estimator. See [native head position](native-head-position.md) for the
+calculation, validation results, and current limitations.
+
+`pose_runtime.py` supplies time-based filtering and trace recording. Gain sliders
+use the tested movement baseline at `1.00`; legacy saved physical gains are
+supported through versioned tuning conversion. Research tools, tests, and local
+captures live under ignored `.tmp/development/` or other `.tmp/` directories.
 
 The runtime packet is a little-endian `double[12]`:
 
@@ -272,7 +287,13 @@ testing path is stock DLL plus middleware/SESP emulation.
 
 ## Important Files
 
-- `scripts/recon/eye-pose-dashboard.py`
+- `tools/app/tobii-ttp-mux.c`
+  Native USB/TTP gaze, eye-origin, and in-band frame reader.
+- `scripts/runtime/native_head_position.py`
+  Native eye-position normalization, rotation compensation, and dropout holds.
+- `scripts/runtime/pose_runtime.py`
+  Time-based packet filtering and optional trace recording.
+- `scripts/runtime/eye-pose-dashboard.py`
   Main dashboard, pose solver, calibration UI, and UDP producer.
 - `scripts/app/run-sc-tobii-native-runtime.sh`
   Runtime supervisor for stock-DLL services and dashboard.

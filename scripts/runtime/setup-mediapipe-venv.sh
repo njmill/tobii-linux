@@ -56,6 +56,6 @@ fi
 "$py" -m venv "$venv"
 "$venv/bin/python" -m pip install --upgrade pip
 "$venv/bin/python" -m pip install -r requirements-mediapipe.txt
-"$venv/bin/python" scripts/recon/mediapipe-face-worker.py --self-test
+"$venv/bin/python" scripts/runtime/mediapipe-face-worker.py --self-test
 
 echo "mediapipe venv ready: $venv"

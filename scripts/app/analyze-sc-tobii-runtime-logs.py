@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import os
 import re
+import shlex
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -15,6 +17,7 @@ ATTR_RE = re.compile(r'<Attr\s+name="([^"]+)"\s+value="([^"]*)"')
 PACKETS_RE = re.compile(r"packets=(\d+)")
 ADOPTION_KICK_MARKER_RE = re.compile(r"adoption_kick_marker\s+(start|end)\s+pid=(\d+)(?:\s+rc=(-?\d+))?")
 KICK_MARKER_RE = re.compile(r"kick_marker\s+name=([^\s]+)\s+phase=(start|end)\s+pid=(\d+)(?:\s+rc=(-?\d+))?")
+EXPORT_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
 OBJECT_NAMES = {
@@ -652,6 +655,7 @@ def parse_sc_context(prefix: Path) -> dict:
                     if symbol.lower() in lower:
                         api_trace[symbol] += 1
     return {
+        "prefix": prefix,
         "attrs_path": attrs_path,
         "attrs": attrs,
         "launch_script": launch_script,
@@ -663,6 +667,57 @@ def parse_sc_context(prefix: Path) -> dict:
         "api_trace": api_trace,
         "interesting_lines": interesting_lines,
     }
+
+
+def runtime_config_file() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "tobii-linux/runtime.env"
+
+
+def parse_runtime_config() -> dict:
+    config = runtime_config_file()
+    values = {}
+    if not config.exists():
+        return values
+    for raw in read_lines(config):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = EXPORT_RE.match(line)
+        if not match:
+            continue
+        key, value = match.groups()
+        try:
+            parts = shlex.split(value, posix=True)
+            values[key] = parts[0] if parts else ""
+        except ValueError:
+            values[key] = value.strip().strip("'\"")
+    return values
+
+
+def prefix_from_bin64(bin64: str) -> str:
+    marker = "/drive_c/"
+    if marker in bin64:
+        return bin64.split(marker, 1)[0]
+    return ""
+
+
+def default_sc_prefix(cli_prefix: str) -> Path:
+    if cli_prefix:
+        return Path(cli_prefix)
+    if os.environ.get("STAR_CITIZEN_PREFIX"):
+        return Path(os.environ["STAR_CITIZEN_PREFIX"])
+    if os.environ.get("SC_BIN64"):
+        prefix = prefix_from_bin64(os.environ["SC_BIN64"])
+        if prefix:
+            return Path(prefix)
+    config = parse_runtime_config()
+    if config.get("STAR_CITIZEN_PREFIX"):
+        return Path(config["STAR_CITIZEN_PREFIX"])
+    if config.get("SC_BIN64"):
+        prefix = prefix_from_bin64(config["SC_BIN64"])
+        if prefix:
+            return Path(prefix)
+    return Path.home() / "Games/star-citizen"
 
 
 def status_line(ok: bool, label: str, detail: str) -> str:
@@ -874,7 +929,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--star-citizen-prefix",
-        default=str(Path.home() / "Games/star-citizen"),
+        default="",
         help="Star Citizen Wine prefix/root used to summarize profile and launcher logs",
     )
     args = parser.parse_args()
@@ -886,11 +941,13 @@ def main() -> int:
     tobii_prefixed_log = runtime_dir / "tobii-prefixed-pipe-spy.log"
     tobiiprp_prefixed_log = runtime_dir / "tobiiprp-prefixed-pipe-spy.log"
     wine_window_probe_log = runtime_dir / "wine-window-probe.log"
+    launch_hook_log = runtime_dir / "launch-hook.log"
     adoption_kick_log = runtime_dir / "adoption-kick.log"
     trackwindow_kick_log = runtime_dir / "trackwindow-kick.log"
     natural_kick_log = runtime_dir / "natural-table-kick.log"
     tcp = parse_tcp(read_lines(tcp_log))
     pipe = parse_pipe(read_lines(pipe_log))
+    launch_hook_lines = read_lines(launch_hook_log)
     etdefault_lines = read_lines(etdefault_log)
     etdefault_listening = sum(1 for line in etdefault_lines if "mode=etdefaultpipe" in line or "ETDefaultPIPE" in line)
     etdefault_requests = sum(1 for line in etdefault_lines if "etdefaultpipe_request" in line)
@@ -905,7 +962,8 @@ def main() -> int:
     kick = parse_kick_log(adoption_kick_log)
     trackwindow_kick = parse_kick_log(trackwindow_kick_log)
     natural_kick = parse_kick_log(natural_kick_log)
-    sc_context = parse_sc_context(Path(args.star_citizen_prefix))
+    sc_prefix = default_sc_prefix(args.star_citizen_prefix)
+    sc_context = parse_sc_context(sc_prefix)
     harness_origins = {"adoption-kick", "trackwindow-kick", "natural-table-kick"}
     sc_tcp_sessions = [s for s in tcp["non_empty_sessions"] if s.get("origin") not in harness_origins]
     kick_tcp_sessions = [s for s in tcp["non_empty_sessions"] if s.get("origin") == "adoption-kick"]
@@ -917,11 +975,13 @@ def main() -> int:
     natural_tcp = summarize_sessions(natural_tcp_sessions)
 
     print(f"runtime_dir={runtime_dir}")
+    print(f"star_citizen_prefix={sc_prefix}")
     print(f"tcp_log={tcp_log} exists={tcp_log.exists()}")
     print(f"pipe_log={pipe_log} exists={pipe_log.exists()}")
     print(f"etdefaultpipe_log={etdefault_log} exists={etdefault_log.exists()}")
     print(f"tobii_prefixed_pipe_log={tobii_prefixed_log} exists={tobii_prefixed_log.exists()}")
     print(f"tobiiprp_prefixed_pipe_log={tobiiprp_prefixed_log} exists={tobiiprp_prefixed_log.exists()}")
+    print(f"launch_hook_log={launch_hook_log} exists={launch_hook_log.exists()}")
     print(f"wine_window_probe_log={wine_window_probe_log} exists={wine_window_probe_log.exists()}")
     print()
 
@@ -1148,6 +1208,9 @@ def main() -> int:
         f"wineserver-kill={'yes' if sc_context['launch_kills_wineserver'] else 'no'}"
     )
     print(status_line(sc_context["native_launch_hook"], "SC launch hook", hook_detail))
+    hook_latest = launch_hook_lines[-1].strip() if launch_hook_lines else "none"
+    hook_executed = bool(launch_hook_lines)
+    print(status_line(hook_executed, "SC launch hook execution", f"lines={len(launch_hook_lines)} latest={hook_latest[:160]}"))
     trace_counts = sc_context["api_trace"]
     trace_detail = ", ".join(f"{name}={count}" for name, count in trace_counts.items()) or "none"
     print(status_line(bool(trace_counts), "Wine Tobii API trace", trace_detail))
@@ -1229,6 +1292,9 @@ def main() -> int:
     elif not sc_context["native_launch_hook"] and sc_context["launch_kills_wineserver"]:
         print("diagnosis=SC launch script is missing the native Tobii hook. sc-launch.sh runs wineserver -k, which kills a manually-started Wine SESP pipe helper before the game starts.")
         print("next=run make sc-tobii-stock-install-launch-hook, start the dashboard, then launch Star Citizen normally so services restart after wineserver -k.")
+    elif sc_context["native_launch_hook"] and sc_context["launch_kills_wineserver"] and not hook_executed and not pipe_accept:
+        print("diagnosis=The native Tobii hook is installed in the detected sc-launch.sh, but there is no launch-hook log and no SESP pipe attach. Star Citizen was likely launched through a different script/launcher than the one patched by the installer.")
+        print("next=launch Star Citizen through the patched sc-launch.sh, or set STAR_CITIZEN_LAUNCH_SCRIPT to the launcher script that is actually executed and rerun make install-launch-hook.")
     elif provider_nudge_failed and not provider_nudge_ok and not provider_latch_seen:
         print("diagnosis=SESP init/display-info path is reached, but provider nudge writes fail because the callback pipe closes before adoption.")
         print("next=focus on natural provider discovery/adoption so the stock DLL calls TrackTracker or reaches the 0x32/0x1a feature latch.")

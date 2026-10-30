@@ -2,22 +2,8 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-prefix="${STAR_CITIZEN_PREFIX:-$HOME/Games/star-citizen}"
-bin64="${SC_BIN64:-}"
-
-if [[ -z "$bin64" ]]; then
-  if [[ -d "$prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Bin64" ]]; then
-    bin64="$prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Bin64"
-  else
-    bin64="$(find "$HOME/Games" -path '*/StarCitizen/*/Bin64' -type d 2>/dev/null | sort | tail -1 || true)"
-  fi
-fi
-
-if [[ -z "$bin64" || ! -d "$bin64" ]]; then
-  echo "error: Star Citizen Bin64 directory not found" >&2
-  echo "set SC_BIN64='/path/to/StarCitizen/LIVE/Bin64' and retry" >&2
-  exit 1
-fi
+source "$root_dir/scripts/app/sc-bin64.sh"
+bin64="$(sc_require_bin64)"
 
 target="$bin64/tobii_gameintegration_x64.dll"
 backup="$bin64/tobii_gameintegration_x64.dll.original"

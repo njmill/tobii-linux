@@ -10,6 +10,28 @@ import sys
 import time
 
 
+class PeriodicLogWriter:
+    def __init__(self, path: str, flush_interval_s: float = 0.5):
+        self.path = path
+        self.flush_interval_s = flush_interval_s
+        self.handle = open(path, "a", encoding="utf-8")
+        self.next_flush = time.monotonic() + flush_interval_s
+
+    def write(self, line: str) -> None:
+        self.handle.write(line + "\n")
+        now = time.monotonic()
+        if now >= self.next_flush:
+            self.handle.flush()
+            self.next_flush = now + self.flush_interval_s
+
+    def close(self) -> None:
+        self.handle.flush()
+        self.handle.close()
+
+
+_LOG_WRITERS: dict[str, PeriodicLogWriter] = {}
+
+
 TTP_OBJECT_NAMES = {
     0x03E8: "hello",
     0x0640: "query_realm",
@@ -38,8 +60,17 @@ def log_line(path, text):
     line = f"{time.time():.6f} {text}"
     print(line, flush=True)
     if path:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        writer = _LOG_WRITERS.get(path)
+        if writer is None:
+            writer = PeriodicLogWriter(path)
+            _LOG_WRITERS[path] = writer
+        writer.write(line)
+
+
+def close_log_writers() -> None:
+    for writer in list(_LOG_WRITERS.values()):
+        writer.close()
+    _LOG_WRITERS.clear()
 
 
 def ttp_response(seq: int, obj: int, payload: bytes = b"", status: int = 0, kind: int = 1) -> bytes:
@@ -352,6 +383,11 @@ def build_capabilities_payload(capability_mode: str = "native", force_headpose: 
     if force_headpose:
         true_indexes.add(12)
 
+    return patch_capability_payload(native, true_indexes, false_indexes)
+
+
+def patch_capability_payload(native: bytes, true_indexes: set[int], false_indexes: set[int]) -> bytes:
+    """Patch captured capability entries while preserving the native byte layout."""
     patched = native
     for index in range(13):
         false_entry = capability_entry(index, False)
@@ -384,7 +420,7 @@ def build_stream_catalog_payload(variant: str = "native") -> bytes:
         "140000000400000000020000000400000000"
         "050000000400041389020000000400000508140000001400000010696d6167655f636f6c6c656374696f6e"
         "1400000004000000000200000004000003e8"
-        "05000000040004138902000000040000050e1400000018000000147072696d6172795f63616d65726163616d6572615f696d616765"
+        "05000000040004138902000000040000050e1400000018000000147072696d6172795f63616d6572615f696d616765"
         "140000000400000000020000000400000000"
         "050000000400041389020000000400001770140000000b00000007616c676f646267"
         "140000000400000000020000000400000000"
@@ -394,11 +430,6 @@ def build_stream_catalog_payload(variant: str = "native") -> bytes:
         "140000000400000000020000000400000000"
         "050000000400041389020000000400001774140000000a00000006637573746f6d"
         "140000000400000000020000000400000000"
-    )
-    # Correct a temporary duplicated substring if this function is edited by hand.
-    payload = payload.replace(
-        bytes.fromhex("7072696d6172795f63616d65726163616d6572615f696d616765"),
-        bytes.fromhex("7072696d6172795f63616d6572615f696d616765"),
     )
     if variant in ("primary-camera", "host-headpose"):
         payload += stream_entry_alias(0x0011)
@@ -901,6 +932,7 @@ def main() -> int:
         server.close()
         udp_server.close()
         log_line(args.log, "stopped")
+        close_log_writers()
 
     return 0
 

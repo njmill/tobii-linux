@@ -29,6 +29,7 @@ static uint32_t sesp_synthetic_headpose_hz = 30;
 static uint32_t sesp_headpose_udp_port = 0;
 static int sesp_provider_nudge = 0;
 static int etdefaultpipe_mode = 0;
+static int client_pipe_suffix_scan = 0;
 static char etdefaultpipe_entry[512] = "127.0.0.1";
 
 struct PosePacket {
@@ -333,7 +334,11 @@ static void drain_service_pipe(HANDLE pipe)
                 ++name_len;
             if (name_len < name_room) {
                 registered_channel = read_le32(buf);
-                snprintf(registered_client_name, sizeof(registered_client_name), "%s", client_name);
+                size_t copy_len = name_len;
+                if (copy_len >= sizeof(registered_client_name))
+                    copy_len = sizeof(registered_client_name) - 1;
+                memcpy(registered_client_name, client_name, copy_len);
+                registered_client_name[copy_len] = '\0';
                 log_line(
                     "service_pipe_register channel=0x%04lx client_name=%s extra_bytes=%lu",
                     (unsigned long)registered_channel,
@@ -567,6 +572,8 @@ static DWORD WINAPI synthetic_headpose_worker(LPVOID arg)
     uint32_t seq = 1;
     int phase = 0;
     int live_was_active = 0;
+    struct PosePacket held_pose;
+    memset(&held_pose, 0, sizeof(held_pose));
     DWORD sleep_ms = sesp_synthetic_headpose_hz ? (DWORD)(1000U / sesp_synthetic_headpose_hz) : 33;
     if (sleep_ms < 5)
         sleep_ms = 5;
@@ -583,7 +590,14 @@ static DWORD WINAPI synthetic_headpose_worker(LPVOID arg)
         float pos_z = 600.0f;
         struct PosePacket live;
         int live_active = snapshot_live_pose(&live, 750);
-        if (live_active) {
+        if (live_active)
+            held_pose = live;
+        if (live_active || sesp_headpose_udp_port) {
+            /* A configured live producer must never turn into a test waveform
+             * when tracking stops. Hold its last pose (neutral before first).
+             * Synthetic motion remains available for explicit non-UDP probes.
+             */
+            live = held_pose;
             const double deg_to_rad = 3.14159265358979323846 / 180.0;
             pos_x = (float)(live.x_cm * 10.0);
             pos_y = (float)(live.y_cm * 10.0);
@@ -591,11 +605,11 @@ static DWORD WINAPI synthetic_headpose_worker(LPVOID arg)
             yaw = (float)(live.yaw_deg * deg_to_rad);
             pitch = (float)(live.pitch_deg * deg_to_rad);
             roll = (float)(live.roll_deg * deg_to_rad);
-            if (!live_was_active)
+            if (live_active && !live_was_active)
                 log_line("sesp_headpose_live_source active port=%lu", (unsigned long)sesp_headpose_udp_port);
-        } else if (live_was_active) {
-            log_line("sesp_headpose_live_source stale fallback=synthetic");
         }
+        if (!live_active && live_was_active)
+            log_line("sesp_headpose_live_source stale fallback=hold");
         live_was_active = live_active;
         DWORD frame_len = 0;
         unsigned char *frame = make_sesp_subscription_headpose(
@@ -620,7 +634,7 @@ static DWORD WINAPI synthetic_headpose_worker(LPVOID arg)
                 log_line("sesp_synthetic_headpose seq=%lu bytes=%lu mode=%s yaw=%.3f pitch=%.3f roll=%.3f",
                          (unsigned long)(seq - 1),
                          (unsigned long)wrote,
-                         live_active ? "live" : "synthetic",
+                         live_active ? "live" : (sesp_headpose_udp_port ? "held" : "synthetic"),
                          yaw,
                          pitch,
                          roll);
@@ -1246,11 +1260,11 @@ static int connect_client_pipe(HANDLE service_pipe)
     drain_service_pipe(service_pipe);
     uint32_t channel = registered_channel;
     char client_name[MAX_PATH];
-    snprintf(client_name, sizeof(client_name), "%s", registered_client_name);
+    snprintf(client_name, sizeof(client_name), "%.*s", (int)(sizeof(client_name) - 1), registered_client_name);
 
     if (client_name[0]) {
-        char name[MAX_PATH];
-        snprintf(name, sizeof(name), "\\\\.\\pipe\\%s", client_name);
+        char name[sizeof("\\\\.\\pipe\\") + MAX_PATH];
+        snprintf(name, sizeof(name), "\\\\.\\pipe\\%.*s", (int)(sizeof(client_name) - 1), client_name);
         HANDLE client = CreateFileA(
             name,
             GENERIC_WRITE,
@@ -1284,7 +1298,7 @@ static int connect_client_pipe(HANDLE service_pipe)
         log_line("client_pipe_registered_open_failed name=%s error=%lu", name, GetLastError());
     }
 
-    if (client_pid) {
+    if (client_pipe_suffix_scan && client_pid) {
         DWORD last_open_error = 0;
         ULONGLONG brute_deadline = GetTickCount64() + 1200;
         while (!handled && GetTickCount64() < brute_deadline) {
@@ -1331,9 +1345,11 @@ static int connect_client_pipe(HANDLE service_pipe)
         if (handled)
             return handled;
         log_line("client_pipe_bruteforce none pid=0x%08lx last_error=%lu", (unsigned long)client_pid, last_open_error);
+    } else if (client_pid) {
+        log_line("client_pipe_bruteforce disabled pid=0x%08lx", (unsigned long)client_pid);
     }
 
-    while (!handled && GetTickCount64() < deadline) {
+    while (client_pipe_suffix_scan && !handled && GetTickCount64() < deadline) {
         WIN32_FIND_DATAW find_data;
         HANDLE find = FindFirstFileW(L"\\\\.\\pipe\\*", &find_data);
         if (find == INVALID_HANDLE_VALUE) {
@@ -1348,8 +1364,8 @@ static int connect_client_pipe(HANDLE service_pipe)
             if (strncmp(file_name, "client_streamengineservices_", 28) != 0)
                 continue;
 
-            char name[MAX_PATH];
-            snprintf(name, sizeof(name), "\\\\.\\pipe\\%s", file_name);
+            char name[sizeof("\\\\.\\pipe\\") + MAX_PATH];
+            snprintf(name, sizeof(name), "\\\\.\\pipe\\%.*s", (int)(sizeof(file_name) - 1), file_name);
             log_line("client_pipe_candidate name=%s", name);
 
             HANDLE client = CreateFileA(
@@ -1392,7 +1408,7 @@ static int connect_client_pipe(HANDLE service_pipe)
     }
 
     if (!handled)
-        log_line("client_pipe_connect none");
+        log_line("client_pipe_connect none suffix_scan=%s", client_pipe_suffix_scan ? "on" : "off");
     return handled;
 }
 
@@ -1413,6 +1429,9 @@ int main(int argc, char **argv)
 {
     DWORD seconds = 35;
     const char *pipe_name = "\\\\.\\pipe\\streamengineservices";
+    const char *suffix_scan_env = getenv("SC_TOBII_PIPE_SUFFIX_SCAN");
+    if (suffix_scan_env && suffix_scan_env[0] && strcmp(suffix_scan_env, "0"))
+        client_pipe_suffix_scan = 1;
 
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--seconds") && i + 1 < argc)
@@ -1464,6 +1483,8 @@ int main(int argc, char **argv)
             sesp_provider_nudge = 1;
         else if (!strcmp(argv[i], "--etdefaultpipe"))
             etdefaultpipe_mode = 1;
+        else if (!strcmp(argv[i], "--client-pipe-suffix-scan"))
+            client_pipe_suffix_scan = 1;
         else if (!strcmp(argv[i], "--etdefault-entry") && i + 1 < argc)
             snprintf(etdefaultpipe_entry, sizeof(etdefaultpipe_entry), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--pipe") && i + 1 < argc)
@@ -1472,7 +1493,7 @@ int main(int argc, char **argv)
 
     ULONGLONG deadline = GetTickCount64() + (ULONGLONG)seconds * 1000ULL;
     log_line(
-        "pipe_listening name=%s seconds=%lu mode=%s reply_bootstrap=%d client_write_len=%lu sesp_connect_reply=%s/0x%lx sesp_auto_reply=%s/%u synthetic_headpose=%s/%lu headpose_udp=%lu provider_nudge=%s etdefault_entry=%s display_override=%s/%lux%lu",
+        "pipe_listening name=%s seconds=%lu mode=%s reply_bootstrap=%d client_write_len=%lu sesp_connect_reply=%s/0x%lx sesp_auto_reply=%s/%u synthetic_headpose=%s/%lu headpose_udp=%lu provider_nudge=%s suffix_scan=%s etdefault_entry=%s display_override=%s/%lux%lu",
         pipe_name,
         (unsigned long)seconds,
         etdefaultpipe_mode ? "etdefaultpipe" : "streamengineservices",
@@ -1486,6 +1507,7 @@ int main(int argc, char **argv)
         (unsigned long)sesp_synthetic_headpose_hz,
         (unsigned long)sesp_headpose_udp_port,
         sesp_provider_nudge ? "on" : "off",
+        client_pipe_suffix_scan ? "on" : "off",
         etdefaultpipe_entry,
         display_name_override[0] ? display_name_override : "auto",
         (unsigned long)display_width_override,

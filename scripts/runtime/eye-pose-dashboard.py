@@ -12,11 +12,15 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import median
 from tkinter import BOTH, Canvas, Tk, Toplevel
 from typing import Callable
+
+from pose_runtime import PacketFilter, TrackingTrace, filter_settings, timed_alpha
+from head_position import HeadPositionEstimator, HeadPositionProfile
+from native_head_position import NativeHeadEstimator, NativeHeadProfile
 
 
 CALIBRATION_TARGETS = [
@@ -63,8 +67,6 @@ TUNING_ATTRS = (
     "mediapipe_yaw_output_scale",
     "mediapipe_pitch_output_scale",
     "mediapipe_roll_output_scale",
-    "mediapipe_translation_output_scale",
-    "mediapipe_depth_output_scale",
     "mediapipe_pitch_yaw_comp",
     "opentrack_max_output_angle",
     "harness",
@@ -72,13 +74,36 @@ TUNING_ATTRS = (
     "tobii_head_pose_source",
 )
 
-DEFAULT_TUNING_VALUES: dict[str, float | str] = {
-    "opentrack_yaw_scale": 8.0,
-    "opentrack_pitch_scale": -14.0,
+# Gains are exposed/saved as multiples of this tested baseline. Runtime and CLI
+# retain physical scales so legacy tuning files, traces and overrides keep meaning.
+TUNING_GAIN_BASELINES = {
+    "opentrack_yaw_scale": 11.75,
+    "opentrack_pitch_scale": -8.25,
     "opentrack_roll_scale": 1.0,
-    "opentrack_x_scale": -3.0,
-    "opentrack_y_scale": 3.0,
-    "opentrack_z_scale": 4.0,
+    "opentrack_x_scale": 1.0,  # Baseline disables X; zero remains explicit/off.
+    "opentrack_y_scale": -0.5,
+    "opentrack_z_scale": 1.0,
+    "mediapipe_yaw_output_scale": 0.08,
+    "mediapipe_pitch_output_scale": 0.10,
+    "mediapipe_roll_output_scale": 0.08,
+}
+
+
+def tuning_multiplier(attr: str, physical_value: float) -> float:
+    return physical_value / TUNING_GAIN_BASELINES.get(attr, 1.0)
+
+
+def tuning_physical_value(attr: str, multiplier: float) -> float:
+    return multiplier * TUNING_GAIN_BASELINES.get(attr, 1.0)
+
+
+DEFAULT_TUNING_VALUES: dict[str, float | str] = {
+    "opentrack_yaw_scale": 11.75,
+    "opentrack_pitch_scale": -8.25,
+    "opentrack_roll_scale": 1.0,
+    "opentrack_x_scale": 0.0,
+    "opentrack_y_scale": -0.5,
+    "opentrack_z_scale": 1.0,
     "opentrack_output_smoothing": 0.03,
     "opentrack_motion_smoothing": 0.05,
     "opentrack_prediction_ms": 45.0,
@@ -86,16 +111,14 @@ DEFAULT_TUNING_VALUES: dict[str, float | str] = {
     "opentrack_stillness_velocity_dps": 10.0,
     "opentrack_max_angle_step": 180.0,
     "opentrack_max_translation_step": 0.20,
-    "opentrack_yaw_curve": 2.0,
-    "opentrack_pitch_curve": 2.0,
+    "opentrack_yaw_curve": 1.0,
+    "opentrack_pitch_curve": 1.0,
     "opentrack_curve_knee_deg": 18.0,
     "blink_hold_s": 0.20,
-    "mediapipe_yaw_output_scale": 0.15,
+    "mediapipe_yaw_output_scale": 0.08,
     "mediapipe_pitch_output_scale": 0.10,
-    "mediapipe_roll_output_scale": 0.15,
-    "mediapipe_translation_output_scale": 10.0,
-    "mediapipe_depth_output_scale": 250.0,
-    "mediapipe_pitch_yaw_comp": 1.0,
+    "mediapipe_roll_output_scale": 0.08,
+    "mediapipe_pitch_yaw_comp": 0.0,
     "opentrack_max_output_angle": 160.0,
     "harness": "tobii",
     "tobii_roll_source": "pose",
@@ -212,6 +235,12 @@ class MediaPipeFaceSample:
     landmarks: int
     latency_ms: float
     error: str = ""
+    matrix: tuple[float, ...] | None = None
+    matrix_pitch: float | None = None
+    landmark_pitch: float | None = None
+    image_width: int = 0
+    image_height: int = 0
+    pose_landmarks: tuple[tuple[int, float, float, float], ...] = ()
 
     @property
     def usable(self) -> bool:
@@ -303,9 +332,12 @@ class SmoothValue:
 
 class PoseSmoother:
     def __init__(self, alpha: float) -> None:
+        self.alpha = alpha
         self.filters = {name: SmoothValue(alpha) for name in ("yaw", "pitch", "roll", "tx", "ty", "tz", "dist", "ddist")}
 
-    def update(self, pose: EyePose) -> EyePose:
+    def update(self, pose: EyePose, dt: float = 1.0 / 60.0) -> EyePose:
+        for filt in self.filters.values():
+            filt.alpha = timed_alpha(self.alpha, dt, 60.0)
         return EyePose(
             yaw=self.filters["yaw"].update(pose.yaw),
             pitch_proxy=self.filters["pitch"].update(pose.pitch_proxy),
@@ -322,6 +354,7 @@ class PoseSmoother:
             filt.reset()
 
     def set_alpha(self, alpha: float) -> None:
+        self.alpha = alpha
         for filt in self.filters.values():
             filt.alpha = alpha
 
@@ -765,11 +798,14 @@ class OpenTrackUdpBridge:
         self.last_pose_source = "none"
         self.latest_values: tuple[float, ...] | None = None
         self.latest_pose_source = "none"
-        self.output_values: list[float] | None = None
-        self.target_values: list[float] | None = None
-        self.target_velocity: list[float] | None = None
-        self.last_target_update_monotonic = 0.0
-        self.last_smooth_monotonic = 0.0
+        self.filter = PacketFilter(args)
+        self.sample_time = 0.0
+        self.gaze_time: float | None = None
+        self.mapping_source = "eye binocular"
+        self.context = {}
+        self.generation = 0
+        trace_path = getattr(args, "tracking_trace", None)
+        self.trace = TrackingTrace(trace_path, args) if trace_path else None
         self.lock = threading.Lock()
         self.closed = threading.Event()
         self.thread = threading.Thread(target=self.pump, name="tobii-udp-pump", daemon=True)
@@ -804,7 +840,17 @@ class OpenTrackUdpBridge:
                 continue
         return addrs
 
-    def send(self, pose: EyePose, gaze: tuple[float, float] | None = None) -> None:
+    def reset(self) -> None:
+        with self.lock:
+            self.filter.reset()
+            self.latest_values = None
+            self.generation += 1
+
+    def send(
+        self, pose: EyePose, gaze: tuple[float, float] | None = None, *,
+        sample_time: float | None = None, gaze_time: float | None = None,
+        context: dict | None = None,
+    ) -> None:
         pose_source = getattr(self.args, "pose_source", "")
         source_code = {
             "eye binocular": 1.0,
@@ -816,7 +862,9 @@ class OpenTrackUdpBridge:
         yaw_pose = pose.yaw
         pitch_pose = pose.pitch_proxy
         roll_pose = pose.roll
-        if pose_source.startswith("MediaPipe"):
+        if pose_source != "hold last pose":
+            self.mapping_source = pose_source
+        if self.mapping_source.startswith("MediaPipe"):
             yaw_pose *= self.args.mediapipe_yaw_output_scale
             pitch_pose *= self.args.mediapipe_pitch_output_scale
             roll_pose *= self.args.mediapipe_roll_output_scale
@@ -853,7 +901,10 @@ class OpenTrackUdpBridge:
         )
         with self.lock:
             self.latest_values = values
-            self.latest_pose_source = getattr(self.args, "pose_source", "none")
+            self.latest_pose_source = pose_source
+            self.sample_time = time.monotonic() if sample_time is None else sample_time
+            self.gaze_time = gaze_time
+            self.context = context or {}
 
     def pump(self) -> None:
         next_send = time.monotonic()
@@ -868,13 +919,22 @@ class OpenTrackUdpBridge:
                 values = self.latest_values
                 if values is None:
                     continue
-                send_values = self.smooth_packet(values)
+                send_values = self.filter.update(values, self.sample_time, now, self.gaze_time)
                 frame_id = float(self.sent)
                 send_values = (*send_values[:7], frame_id, send_values[8], send_values[9], send_values[10], frame_id)
                 packet = struct.pack("=" + "d" * len(send_values), *send_values)
                 addr = self.addr
                 extra_addrs = list(self.extra_addrs)
                 pose_source = self.latest_pose_source
+                trace_row = None
+                if self.trace is not None:
+                    trace_row = {
+                        "kind": "packet", "time": now,
+                        "sample_time": self.sample_time, "gaze_time": self.gaze_time,
+                        "generation": self.generation, "input": values,
+                        "output": send_values, "filter_settings": filter_settings(self.args),
+                        "context": self.context,
+                    }
             try:
                 targets = [addr]
                 for extra_addr in extra_addrs:
@@ -888,68 +948,16 @@ class OpenTrackUdpBridge:
                     self.last_packet = send_values
                     self.last_pose_source = pose_source
                     self.last_error = ""
+                    if self.trace is not None:
+                        try:
+                            self.trace.write(trace_row)
+                        except (OSError, ValueError) as exc:
+                            self.last_error = f"tracking trace disabled: {exc}"
+                            self.trace.close()
+                            self.trace = None
             except OSError as exc:
                 with self.lock:
                     self.last_error = str(exc)
-
-    def smooth_packet(self, values: tuple[float, ...]) -> tuple[float, ...]:
-        now = time.monotonic()
-        if self.output_values is None:
-            self.output_values = list(values[:6])
-            self.target_values = list(values[:6])
-            self.target_velocity = [0.0] * 6
-            self.last_target_update_monotonic = now
-            self.last_smooth_monotonic = now
-        else:
-            still_alpha = clamp(self.args.opentrack_output_smoothing, 0.01, 1.0)
-            motion_alpha = clamp(max(self.args.opentrack_motion_smoothing, still_alpha), still_alpha, 1.0)
-            dt = clamp(now - self.last_smooth_monotonic, 0.001, 0.100) if self.last_smooth_monotonic else 1.0 / 60.0
-            self.last_smooth_monotonic = now
-            if self.target_values is None:
-                self.target_values = list(values[:6])
-                self.last_target_update_monotonic = now
-            if self.target_velocity is None:
-                self.target_velocity = [0.0] * 6
-
-            velocity_alpha = clamp(motion_alpha * 0.65, 0.08, 0.65)
-            prediction_s = clamp(self.args.opentrack_prediction_ms / 1000.0, 0.0, 0.160)
-            # Step sliders are now jump guards, not normal speed governors. They only
-            # prevent a bogus sample from teleporting the camera.
-            step_scale = dt * 60.0
-            max_angle_step = max(self.args.opentrack_max_angle_step, 0.1) * step_scale
-            max_translation_step = max(self.args.opentrack_max_translation_step, 0.05) * step_scale
-            sample_dt = clamp(now - self.last_target_update_monotonic, dt, 0.250) if self.last_target_update_monotonic else dt
-            saw_target_update = False
-            for index in range(6):
-                target = values[index]
-                step_limit = max_translation_step if index < 3 else max_angle_step
-                target_delta = target - self.target_values[index]
-                update_epsilon = 0.01 if index < 3 else 0.03
-                stillness_deadband = 0.02 if index < 3 else max(self.args.opentrack_stillness_deadband_deg, update_epsilon)
-                stillness_velocity = 1.0 if index < 3 else max(self.args.opentrack_stillness_velocity_dps, 0.1)
-                if abs(target_delta) > update_epsilon:
-                    measured_velocity = target_delta / sample_dt
-                    self.target_velocity[index] += (measured_velocity - self.target_velocity[index]) * velocity_alpha
-                    self.target_values[index] = target
-                    saw_target_update = True
-                elif sample_dt > 0.160:
-                    self.target_velocity[index] *= max(0.0, 1.0 - dt * 8.0)
-                extrapolate_s = clamp((now - self.last_target_update_monotonic) + prediction_s, 0.0, 0.140)
-                predicted_target = self.target_values[index] + self.target_velocity[index] * extrapolate_s
-                output_error = predicted_target - self.output_values[index]
-                if index < 3:
-                    motion_score = clamp(max(abs(output_error) / 0.35, abs(self.target_velocity[index]) / 8.0), 0.0, 1.0)
-                else:
-                    motion_score = clamp(max(abs(output_error) / 2.0, abs(self.target_velocity[index]) / 75.0), 0.0, 1.0)
-                alpha = still_alpha + (motion_alpha - still_alpha) * (motion_score ** 0.55)
-                damping = 1.0
-                if abs(output_error) < stillness_deadband and abs(self.target_velocity[index]) <= stillness_velocity:
-                    damping = clamp(abs(output_error) / stillness_deadband, 0.18, 1.0)
-                wanted = output_error * alpha * damping
-                self.output_values[index] += clamp(wanted, -step_limit, step_limit)
-            if saw_target_update:
-                self.last_target_update_monotonic = now
-        return (*self.output_values, *values[6:])
 
     def apply_angle_curve(self, value: float, curve: float, knee: float) -> float:
         curve = max(curve, 1.0)
@@ -962,8 +970,11 @@ class OpenTrackUdpBridge:
 
     def close(self) -> None:
         self.closed.set()
-        self.thread.join(timeout=0.5)
+        self.thread.join()
         self.sock.close()
+        if self.trace is not None:
+            self.trace.close()
+            self.trace = None
 
 
 class CsvTail:
@@ -1016,7 +1027,7 @@ class MediaPipeWorkerClient:
             return
         cmd = [
             str(self.args.mediapipe_python),
-            str(self.root_dir / "scripts" / "recon" / "mediapipe-face-worker.py"),
+            str(self.root_dir / "scripts" / "runtime" / "mediapipe-face-worker.py"),
             "--model",
             str(self.args.mediapipe_model),
             "--preprocess",
@@ -1084,6 +1095,10 @@ class MediaPipeFaceBridge:
         self.log_dir = log_dir
         self.worker = MediaPipeWorkerClient(root_dir, args)
         self.thread: threading.Thread | None = None
+        self.processor_thread: threading.Thread | None = None
+        self.pending_frame_path: Path | None = None
+        self.pending_frame_elapsed_ms = 0.0
+        self.pending_condition = threading.Condition()
         self.stop = threading.Event()
         self.frames_seen = 0
         self.frames_sent = 0
@@ -1108,10 +1123,14 @@ class MediaPipeFaceBridge:
 
     def attach_mux_stdout(self, stdout) -> None:
         self.thread = threading.Thread(target=self._run_frame_bridge, args=(stdout,), name="mediapipe-frame-bridge", daemon=True)
+        self.processor_thread = threading.Thread(target=self._run_frame_processor, name="mediapipe-frame-processor", daemon=True)
+        self.processor_thread.start()
         self.thread.start()
 
     def terminate(self) -> None:
         self.stop.set()
+        with self.pending_condition:
+            self.pending_condition.notify_all()
         self.worker.close()
 
     def snapshot(self) -> MediaPipeFaceSample | None:
@@ -1141,14 +1160,32 @@ class MediaPipeFaceBridge:
             wanted_stream = self.args.mediapipe_image_stream.lower().removeprefix("0x")
             if wanted_stream and f"stream{wanted_stream}" not in path.name.lower():
                 continue
-            self.feed_frame(path)
+            with self.pending_condition:
+                # Keep only the freshest frame. MediaPipe can be slower than the
+                # mux frame stream; blocking this stdout reader can stall gaze too.
+                self.pending_frame_path = path
+                self.pending_frame_elapsed_ms = time.monotonic() * 1000.0
+                self.pending_condition.notify()
 
-    def feed_frame(self, path: Path) -> None:
+    def _run_frame_processor(self) -> None:
+        while not self.stop.is_set():
+            with self.pending_condition:
+                while self.pending_frame_path is None and not self.stop.is_set():
+                    self.pending_condition.wait(timeout=0.25)
+                if self.stop.is_set():
+                    break
+                path = self.pending_frame_path
+                elapsed_ms = self.pending_frame_elapsed_ms
+                self.pending_frame_path = None
+            if path is not None:
+                self.feed_frame(path, elapsed_ms)
+
+    def feed_frame(self, path: Path, elapsed_ms: float | None = None) -> None:
         try:
-            result = self.worker.process(path, time.monotonic() * 1000.0)
+            result = self.worker.process(path, elapsed_ms if elapsed_ms is not None else time.monotonic() * 1000.0)
             self.frames_sent += 1
             now = time.monotonic()
-            sample = self.sample_from_result(result, now)
+            sample = self.sample_from_result(result, (elapsed_ms / 1000.0) if elapsed_ms is not None else now)
             with self.lock:
                 self.latest_sample = sample
             if sample.usable:
@@ -1161,7 +1198,11 @@ class MediaPipeFaceBridge:
             self.last_error = str(exc)
 
     def sample_from_result(self, result: dict[str, object], now: float) -> MediaPipeFaceSample:
-        if not bool(result.get("present")):
+        valid_angles = all(
+            isinstance(result.get(axis), (int, float)) and math.isfinite(result[axis])
+            for axis in ("yaw", "pitch", "roll")
+        )
+        if not bool(result.get("present")) or not valid_angles:
             return MediaPipeFaceSample(
                 frame=self.frames_sent,
                 seen_monotonic=now,
@@ -1176,7 +1217,7 @@ class MediaPipeFaceBridge:
                 face_height=0.0,
                 landmarks=0,
                 latency_ms=float(result.get("latency_ms") or 0.0),
-                error=str(result.get("error") or "no face"),
+                error=str(result.get("error") or "no valid face pose"),
             )
         translation = result.get("translation") if isinstance(result.get("translation"), list) else []
         tx = float(translation[0]) if len(translation) > 0 else 0.0
@@ -1205,6 +1246,17 @@ class MediaPipeFaceBridge:
             face_height=face_height,
             landmarks=len(landmarks) if isinstance(landmarks, list) else 0,
             latency_ms=float(result.get("latency_ms") or 0.0),
+            matrix=tuple(result["matrix"]) if isinstance(result.get("matrix"), list) else None,
+            matrix_pitch=result.get("matrix_pitch"),
+            landmark_pitch=result.get("landmark_pitch"),
+            image_width=int(result.get("image_width") or 0),
+            image_height=int(result.get("image_height") or 0),
+            pose_landmarks=tuple(
+                (int(item["index"]), float(item["x"]), float(item["y"]), float(item["z"]))
+                for item in (landmarks or [])
+                if isinstance(item, dict) and item.get("index") in (1, 4, 33, 133, 263, 362, 61, 291, 152, 10)
+                and all(isinstance(item.get(key), (int, float)) and math.isfinite(item[key]) for key in ("x", "y", "z"))
+            ),
         )
 
 
@@ -1637,6 +1689,11 @@ class EyePoseDashboard:
         self.latest: EyeSample | None = None
         self.latest_mediapipe: MediaPipeFaceSample | None = None
         self.raw_pose: EyePose | None = None
+        self.latest_eye_pose: EyePose | None = None
+        self.last_eye_translation = (0.0, 0.0, 0.0)
+        self.last_eye_translation_time: float | None = None
+        self.translation_source = "neutral"
+        self.translation_observation_status = "no measurement"
         self.pose: EyePose | None = None
         self.pose_source = "none"
         self.confidence = PoseConfidence()
@@ -1647,6 +1704,7 @@ class EyePoseDashboard:
         self.last_eye_velocity = 0.0
         self.gaze_trail: deque[tuple[float, float]] = deque(maxlen=45)
         self.smoothed_gaze_ratio: tuple[float, float] | None = None
+        self.gaze_sample_time: float | None = None
         self.gaze_calibration_file: Path | None = getattr(args, "gaze_calibration_file", None)
         self.gaze_affine: tuple[list[float], list[float]] | None = load_gaze_calibration(self.gaze_calibration_file)
         self.gaze_offset_x = 0.0
@@ -1673,14 +1731,23 @@ class EyePoseDashboard:
         self.mediapipe_yaw_neutral: float | None = None
         self.mediapipe_pitch_neutral: float | None = None
         self.mediapipe_roll_neutral: float | None = None
-        self.mediapipe_tx_neutral: float | None = None
-        self.mediapipe_ty_neutral: float | None = None
-        self.mediapipe_tz_neutral: float | None = None
-        self.mediapipe_face_size_neutral: float | None = None
+        self.native_head_position = NativeHeadEstimator(args.native_head_calibration) if args.native_head_calibration is not None else None
+        self.head_position = None
+        self.head_position_mode = args.head_position_mode
+        if args.head_position_calibration is not None:
+            self.head_position = HeadPositionEstimator(args.head_position_calibration)
+            print(f"head_position=calibrated mode={self.head_position_mode} profile={args.head_position_profile}")
+        elif self.native_head_position is not None:
+            print(f"head_position=native mode={self.head_position_mode} profile={args.native_head_position_profile}")
+        else:
+            print("head_position=eye_origins (no calibrated profile selected)")
         self.inband_dashboard_proc: subprocess.Popen | None = None
         self.face_handoff_yaw_bias = 0.0
         self.face_handoff_pitch_bias = 0.0
         self.face_handoff_active = False
+        self.last_mediapipe_pose: EyePose | None = None
+        self.last_mediapipe_pose_monotonic = 0.0
+        self.last_mediapipe_pose_confidence = 0.0
         self.pitch_up_hold: float | None = None
         self.pitch_debug_trace: deque[dict[str, object]] = deque(maxlen=max(240, int(args.pitch_debug_seconds * 140)))
         self.pitch_debug_raw: float | None = None
@@ -1695,6 +1762,8 @@ class EyePoseDashboard:
         self.sampler_restart_count = 0
         self.last_sampler_restart_monotonic = 0.0
         self.last_pose_monotonic = 0.0
+        self.last_filter_sample_time: float | None = None
+        self.last_filter_source = "none"
         self.status = "starting"
 
     def quit(self, _event=None) -> None:
@@ -1744,7 +1813,7 @@ class EyePoseDashboard:
 
         log_path = session_dir / "inband-landmark-dashboard.log"
         cmd = [
-            str(self.root_dir / "scripts" / "recon" / "inband-landmark-dashboard.py"),
+            str(self.root_dir / "scripts" / "runtime" / "inband-landmark-dashboard.py"),
             "--engine",
             "mediapipe",
             "--no-start-mux",
@@ -1854,11 +1923,7 @@ class EyePoseDashboard:
             target = self.active_udp_target()
             if target:
                 self.opentrack_bridge.retarget(target)
-            with self.opentrack_bridge.lock:
-                self.opentrack_bridge.output_values = None
-                self.opentrack_bridge.target_values = None
-                self.opentrack_bridge.target_velocity = None
-                self.opentrack_bridge.last_target_update_monotonic = 0.0
+            self.opentrack_bridge.reset()
         self.save_tuning()
         self.status = "tuning reset"
 
@@ -1868,6 +1933,7 @@ class EyePoseDashboard:
             return
         if self.gaze_affine is not None:
             self.smoothed_gaze_ratio = None
+            self.gaze_sample_time = None
             self.gaze_trail.clear()
             return
         self.gaze_affine = None
@@ -1882,6 +1948,7 @@ class EyePoseDashboard:
 
     def clear_gaze_runtime_state(self) -> None:
         self.smoothed_gaze_ratio = None
+        self.gaze_sample_time = None
         self.gaze_trail.clear()
         self.calibration_index = None
         self.calibration_points = []
@@ -1920,6 +1987,7 @@ class EyePoseDashboard:
         self.calibration_index = 0
         self.calibration_points = []
         self.smoothed_gaze_ratio = None
+        self.gaze_sample_time = None
         self.gaze_trail.clear()
         self.status = "gaze calibration"
 
@@ -1956,6 +2024,7 @@ class EyePoseDashboard:
         self.gaze_offset_x = 0.0
         self.gaze_offset_y = 0.0
         self.smoothed_gaze_ratio = None
+        self.gaze_sample_time = None
         self.gaze_trail.clear()
         save_gaze_calibration(self.gaze_calibration_file, affine)
         self.status = "gaze calibrated"
@@ -1998,7 +2067,10 @@ class EyePoseDashboard:
 
     def update_smoothed_gaze(self, sample: EyeSample) -> None:
         if sample.gaze_valid != 1 or not math.isfinite(sample.gaze_x) or not math.isfinite(sample.gaze_y):
+            self.smoothed_gaze_ratio = None
+            self.gaze_sample_time = None
             return
+        self.gaze_sample_time = sample.monotonic_ns / 1e9
         ratio = self.gaze_ratio(sample)
         alpha = clamp(self.args.gaze_smoothing, 0.0, 1.0)
         if self.smoothed_gaze_ratio is None or alpha >= 1.0:
@@ -2028,12 +2100,12 @@ class EyePoseDashboard:
 
     def adjust_gain(self, axis: str, delta: float) -> None:
         attr = f"opentrack_{axis}_scale"
-        current = getattr(self.args, attr)
+        current = tuning_multiplier(attr, getattr(self.args, attr))
         if abs(current) < 0.001 and delta < 0:
             updated = -0.25
         else:
             updated = current + delta
-        setattr(self.args, attr, clamp(updated, -30.0, 30.0))
+        setattr(self.args, attr, tuning_physical_value(attr, clamp(updated, -3.0, 3.0)))
         self.save_tuning()
 
     def start_loop(self) -> None:
@@ -2090,7 +2162,8 @@ class EyePoseDashboard:
         if self.mediapipe_bridge is not None:
             self.latest_mediapipe = self.mediapipe_bridge.snapshot()
 
-        for sample in self.tail.read_new():
+        eye_rows = self.tail.read_new()
+        for row_index, sample in enumerate(eye_rows):
             saw_eye_row = True
             self.latest = sample
             self.samples.append(sample)
@@ -2106,16 +2179,19 @@ class EyePoseDashboard:
                     self.capture_face_neutral()
                     self.smoother.reset()
                     self.status = "streaming"
-                if self.baseline is not None:
+                if self.baseline is not None and row_index == len(eye_rows) - 1:
                     self.raw_pose = derive_pose(sample, self.baseline, self.args.sensor_distance_mm)
+                    self.latest_eye_pose = self.raw_pose
                     self.confidence = self.eye_confidence(sample, self.raw_pose, now)
+                    self.observe_eye_translation(sample, self.raw_pose, now)
                     fused_pose, fused_source = self.fused_pose(self.raw_pose, self.confidence, now)
                     self.pose = self.smooth_runtime_pose(fused_pose, fused_source) if self.smoothing_enabled else fused_pose
                     self.pose_source = fused_source
-                    self.last_pose_monotonic = now
+                    self.last_pose_monotonic = self.pose_sample_time(fused_source)
                     self.pose_trail.append((self.pose.yaw, self.pose.pitch_proxy))
                     saw_valid_eye_pose = True
-            elif self.baseline is not None:
+            elif self.baseline is not None and row_index == len(eye_rows) - 1:
+                self.translation_observation_status = "invalid eyes"
                 if self.args.tobii_head_pose_source == "face" and self.apply_face_fallback(now):
                     pass
                 elif self.hold_pose_if_recent(now, self.args.blink_hold_s):
@@ -2153,7 +2229,11 @@ class EyePoseDashboard:
             target = self.active_udp_target()
             if target:
                 self.opentrack_bridge.retarget(target)
-            self.opentrack_bridge.send(self.pose, self.smoothed_gaze_ratio)
+            self.opentrack_bridge.send(
+                self.pose, self.smoothed_gaze_ratio,
+                sample_time=self.last_pose_monotonic, gaze_time=self.gaze_sample_time,
+                context=self.tracking_context() if self.opentrack_bridge.trace is not None else None,
+            )
             self.record_pitch_debug(now)
 
         self.draw()
@@ -2258,28 +2338,44 @@ class EyePoseDashboard:
 
     def face_confidence(self, now: float) -> float:
         sample = self.latest_mediapipe
-        if sample is None or not sample.usable:
-            return 0.0
-        age = now - sample.seen_monotonic
-        if age > self.args.mediapipe_max_age_s:
-            return 0.0
-        age_score = 1.0 - clamp(age / max(self.args.mediapipe_max_age_s, 0.001), 0.0, 1.0)
-        return clamp(sample.confidence * max(age_score, 0.35), 0.0, 1.0)
+        if sample is not None and sample.usable:
+            age = now - sample.seen_monotonic
+            if age <= self.args.mediapipe_max_age_s:
+                age_score = 1.0 - clamp(age / max(self.args.mediapipe_max_age_s, 0.001), 0.0, 1.0)
+                return clamp(sample.confidence * max(age_score, 0.35), 0.0, 1.0)
+
+        held_age = now - self.last_mediapipe_pose_monotonic
+        if self.last_mediapipe_pose is not None and held_age <= self.args.mediapipe_pose_hold_s:
+            hold_score = 1.0 - clamp(held_age / max(self.args.mediapipe_pose_hold_s, 0.001), 0.0, 1.0)
+            return clamp(self.last_mediapipe_pose_confidence * max(hold_score, 0.35), 0.18, 0.75)
+        return 0.0
 
     def fused_pose(self, eye_pose: EyePose, confidence: PoseConfidence, now: float) -> tuple[EyePose, str]:
         face_primary = self.args.tobii_head_pose_source == "face"
         face_pose = self.face_fallback_pose(use_handoff=not face_primary)
         face_conf = self.face_confidence(now)
         confidence.face = face_conf
-        if face_pose is None or face_conf <= 0.0 or self.args.tobii_head_pose_source == "eye":
+
+        if self.args.tobii_head_pose_source == "eye":
             confidence.blended = confidence.eye
             self.face_handoff_active = False
             return eye_pose, "eye binocular"
 
         if face_primary:
             self.face_handoff_active = False
-            confidence.blended = clamp(face_conf * max(confidence.eye, 0.35), 0.0, 1.0)
-            return face_pose, self.face_primary_source_name()
+            if face_pose is not None and face_conf > 0.0:
+                confidence.blended = clamp(max(face_conf, 0.35) * max(confidence.eye, 0.35), 0.0, 1.0)
+                return face_pose, self.face_primary_source_name()
+            if self.pose is not None:
+                confidence.blended = 0.18
+                return self.pose, self.face_primary_source_name()
+            confidence.blended = confidence.eye
+            return eye_pose, "eye binocular"
+
+        if face_pose is None or face_conf <= 0.0:
+            confidence.blended = confidence.eye
+            self.face_handoff_active = False
+            return eye_pose, "eye binocular"
 
         # Fade toward face as eye confidence drops, at high yaw, or during pitch-up
         # where the eye-origin vertical proxy is known to snap.
@@ -2331,16 +2427,62 @@ class EyePoseDashboard:
             self.pitch_up_hold = pose.pitch_proxy
         return pose
 
+    def pose_sample_time(self, source: str) -> float:
+        if source.startswith("MediaPipe") and self.latest_mediapipe is not None:
+            if self.latest_mediapipe.usable:
+                native = getattr(self, "native_head_position", None)
+                if native is not None and self.head_position_mode == "native" and native.last_eye_time is not None:
+                    return max(self.latest_mediapipe.seen_monotonic, native.last_eye_time)
+                return self.latest_mediapipe.seen_monotonic
+            return self.last_mediapipe_pose_monotonic
+        if self.latest is not None:
+            return self.latest.monotonic_ns / 1e9
+        return self.last_pose_monotonic
+
     def smooth_runtime_pose(self, pose: EyePose, source: str) -> EyePose:
+        sample_time = self.pose_sample_time(source)
+        if self.last_filter_sample_time is not None and sample_time <= self.last_filter_sample_time and source == self.last_filter_source:
+            return self.pose if self.pose is not None else pose
+        dt = 1.0 / 60.0 if self.last_filter_sample_time is None else max(0.0, sample_time - self.last_filter_sample_time)
         base_alpha = clamp(self.args.smoothing, 0.01, 1.0)
-        if source != self.pose_source or source == "hold last pose":
-            alpha = min(base_alpha, self.args.transition_smoothing)
-        elif self.confidence.eye < 0.55 and self.confidence.face > 0.0:
-            alpha = min(base_alpha, self.args.transition_smoothing)
-        else:
-            alpha = base_alpha
+        alpha = min(base_alpha, self.args.transition_smoothing) if source != self.pose_source else base_alpha
         self.smoother.set_alpha(alpha)
-        return self.smoother.update(pose)
+        self.last_filter_sample_time = sample_time
+        self.last_filter_source = source
+        return self.smoother.update(pose, dt)
+
+    def tracking_context(self) -> dict:
+        face = self.latest_mediapipe
+        return {
+            "source": self.pose_source,
+            "face": asdict(face) if face is not None else None,
+            "neutral_ypr": [self.mediapipe_yaw_neutral, self.mediapipe_pitch_neutral, self.mediapipe_roll_neutral],
+            "eye_pose": asdict(self.latest_eye_pose) if self.latest_eye_pose is not None else None,
+            "translation": {
+                "source": self.translation_source,
+                "eye_sample_time": self.last_eye_translation_time,
+                "trusted_position_mm": self.last_eye_translation,
+                "observation_status": self.translation_observation_status,
+                "latest_eye_sample_time": self.latest.monotonic_ns / 1e9 if self.latest is not None else None,
+                "latest_eyes_valid": self.latest.valid if self.latest is not None else False,
+                "eye_separation_mm": self.latest.eye_distance if self.latest is not None and self.latest.valid else None,
+            },
+            "native_head_position": self.native_head_position.snapshot() if self.native_head_position is not None else None,
+            "head_position": self.head_position.snapshot() if self.head_position is not None else None,
+            "neutral_relative_face_ypr": [
+                angle_delta_deg(value, neutral) if neutral is not None else None
+                for value, neutral in zip(
+                    (face.yaw, face.pitch, face.roll) if face else (0.0, 0.0, 0.0),
+                    (self.mediapipe_yaw_neutral, self.mediapipe_pitch_neutral, self.mediapipe_roll_neutral),
+                )
+            ],
+            "filtered_pose": asdict(self.pose) if self.pose is not None else None,
+            "pitch_mapping": {
+                "yaw_compensation": self.args.mediapipe_pitch_yaw_comp,
+                "curve": self.args.opentrack_pitch_curve,
+                "gain": self.args.mediapipe_pitch_output_scale * self.args.opentrack_pitch_scale,
+            },
+        }
 
     def face_primary_source_name(self) -> str:
         return "MediaPipe head primary"
@@ -2355,6 +2497,11 @@ class EyePoseDashboard:
         face_primary = self.args.tobii_head_pose_source == "face"
         fallback = self.face_fallback_pose(use_handoff=not face_primary)
         if fallback is None:
+            if face_primary and self.pose is not None:
+                self.pose_source = self.face_primary_source_name()
+                self.confidence = PoseConfidence(eye=0.0, face=0.0, blended=0.18, pitch=0.0)
+                self.pose_trail.append((self.pose.yaw, self.pose.pitch_proxy))
+                return True
             return False
         if not face_primary and self.pose is not None and self.pose.pitch_proxy >= self.args.eye_pitch_up_edge_deg:
             allowed_drop = max(self.args.pitch_snapback_guard_deg, 0.01)
@@ -2375,7 +2522,7 @@ class EyePoseDashboard:
         self.confidence = PoseConfidence(eye=0.0, face=self.face_confidence(now), blended=self.face_confidence(now), pitch=self.face_confidence(now))
         self.pose = self.smooth_runtime_pose(fallback, source) if self.smoothing_enabled else fallback
         self.pose_source = source
-        self.last_pose_monotonic = now
+        self.last_pose_monotonic = self.pose_sample_time(source)
         self.pose_trail.append((self.pose.yaw, self.pose.pitch_proxy))
         return True
 
@@ -2394,13 +2541,23 @@ class EyePoseDashboard:
         return self.face_fallback_pose(use_handoff=False)
 
     def clear_face_calibration(self) -> None:
+        self.latest_eye_pose = None
+        self.last_eye_translation = (0.0, 0.0, 0.0)
+        self.last_eye_translation_time = None
+        self.translation_source = "neutral"
+        self.translation_observation_status = "no measurement"
+        if getattr(self, "native_head_position", None) is not None:
+            self.native_head_position.recenter()
+        if getattr(self, "head_position", None) is not None:
+            self.head_position.recenter()
+        self.last_filter_sample_time = None
+        self.last_mediapipe_pose = None
+        self.last_mediapipe_pose_monotonic = 0.0
+        if self.opentrack_bridge is not None:
+            self.opentrack_bridge.reset()
         self.mediapipe_yaw_neutral = None
         self.mediapipe_pitch_neutral = None
         self.mediapipe_roll_neutral = None
-        self.mediapipe_tx_neutral = None
-        self.mediapipe_ty_neutral = None
-        self.mediapipe_tz_neutral = None
-        self.mediapipe_face_size_neutral = None
         self.face_handoff_yaw_bias = 0.0
         self.face_handoff_pitch_bias = 0.0
         self.face_handoff_active = False
@@ -2417,10 +2574,8 @@ class EyePoseDashboard:
         self.mediapipe_yaw_neutral = sample.yaw
         self.mediapipe_pitch_neutral = sample.pitch
         self.mediapipe_roll_neutral = sample.roll
-        self.mediapipe_tx_neutral = sample.tx
-        self.mediapipe_ty_neutral = sample.ty
-        self.mediapipe_tz_neutral = sample.tz
-        self.mediapipe_face_size_neutral = math.sqrt(max(sample.face_width * sample.face_height, 0.0))
+        if self.head_position is not None:
+            self.head_position.update(sample.matrix, sample.seen_monotonic, time.monotonic())
 
     def mediapipe_sample_usable(self, sample: MediaPipeFaceSample) -> bool:
         return sample.usable and sample.confidence >= self.args.mediapipe_min_face_confidence
@@ -2470,55 +2625,97 @@ class EyePoseDashboard:
             return None
         return angle_delta_deg(self.latest_mediapipe.roll, self.mediapipe_roll_neutral) * self.args.mediapipe_roll_sign
 
-    def corrected_mediapipe_translation(self) -> tuple[float, float, float] | None:
-        if not self.latest_mediapipe_usable() or self.latest_mediapipe is None:
-            return None
-        if (
-            self.mediapipe_tx_neutral is None
-            or self.mediapipe_ty_neutral is None
-            or self.mediapipe_tz_neutral is None
-            or self.mediapipe_face_size_neutral is None
-        ):
-            self.capture_mediapipe_neutral()
-        if (
-            self.mediapipe_tx_neutral is None
-            or self.mediapipe_ty_neutral is None
-            or self.mediapipe_tz_neutral is None
-        ):
-            return None
-        sample = self.latest_mediapipe
-        scale = self.args.mediapipe_translation_output_scale
-        matrix_z = (sample.tz - self.mediapipe_tz_neutral) * scale
-        face_size = math.sqrt(max(sample.face_width * sample.face_height, 0.0))
-        depth_z = matrix_z
-        if self.mediapipe_face_size_neutral and self.mediapipe_face_size_neutral > 1.0 and face_size > 1.0:
-            depth_ratio = (face_size / self.mediapipe_face_size_neutral) - 1.0
-            depth_z = depth_ratio * self.args.mediapipe_depth_output_scale
-        return (
-            (sample.tx - self.mediapipe_tx_neutral) * scale,
-            (sample.ty - self.mediapipe_ty_neutral) * scale,
-            depth_z,
-        )
-
-    def eye_origin_translation(self) -> tuple[float, float, float] | None:
-        if self.raw_pose is None:
-            return None
+    def observe_eye_translation(
+        self, sample: EyeSample, pose: EyePose, now: float,
+    ) -> None:
+        # Keep the metric observation separate from raw_pose, which face fallback
+        # overwrites. Never recycle a fallback pose as new eye-origin data.
+        sample_time = sample.monotonic_ns / 1e9
         max_age = max(self.args.blink_hold_s, self.args.eye_fallback_after_s, self.args.mediapipe_max_age_s)
-        if self.last_eye_pose_time <= 0.0 or time.monotonic() - self.last_eye_pose_time > max_age:
-            return None
-        if self.confidence.eye_distance_stable <= 0.25:
-            return None
-        tz = self.raw_pose.tz
-        face_translation = self.corrected_mediapipe_translation()
-        if abs(tz) < self.args.eye_origin_z_deadband_mm and face_translation is not None:
-            tz = face_translation[2]
-        return (self.raw_pose.tx, self.raw_pose.ty, tz)
+        if not sample.valid:
+            self.translation_observation_status = "invalid eyes"
+            return
+        # Eye-distance stability is an orientation-confidence heuristic, not a
+        # position-validity flag. In the lean capture it rejected valid moving
+        # midpoints for over a second. Keep a broad geometry sanity check, but
+        # do not require separation to stay within a few mm of startup.
+        if not 20.0 < sample.eye_distance <= 100.0:
+            self.translation_observation_status = "implausible eye separation"
+            return
+        if not 0.0 <= now - sample_time <= max_age:
+            self.translation_observation_status = "stale eye sample"
+            return
+        if not all(math.isfinite(v) for v in (pose.tx, pose.ty, pose.tz)):
+            self.translation_observation_status = "non-finite eye position"
+            return
+        if self.last_eye_translation_time is not None and sample_time <= self.last_eye_translation_time:
+            self.translation_observation_status = "repeated eye sample"
+            return
+        self.last_eye_translation = (pose.tx, pose.ty, pose.tz)
+        self.last_eye_translation_time = sample_time
+        self.translation_observation_status = "accepted"
+
+    def eye_origin_translation(self) -> tuple[float, float, float]:
+        # A face bounding box changes with rotation and cannot supply metric
+        # depth. Hold the last trusted binocular position during eye loss.
+        if self.last_eye_translation_time is None:
+            self.translation_source = "neutral"
+        else:
+            max_age = max(self.args.blink_hold_s, self.args.eye_fallback_after_s, self.args.mediapipe_max_age_s)
+            fresh = 0.0 <= time.monotonic() - self.last_eye_translation_time <= max_age
+            accepted = self.translation_observation_status == "accepted"
+            self.translation_source = "eye origins" if fresh and accepted and self.latest is not None and self.latest.valid else "held eye origins"
+        return self.last_eye_translation
+
+    def head_translation(self) -> tuple[float, float, float]:
+        native = self.eye_origin_translation()
+        corrected = getattr(self, "native_head_position", None)
+        if corrected is not None:
+            now = time.monotonic()
+            face = self.latest_mediapipe
+            if face is not None and self.latest_mediapipe_usable():
+                corrected.observe_orientation(face.matrix, face.seen_monotonic, now)
+            eye = self.latest
+            if eye is not None:
+                corrected.update_eye(eye.left, eye.right, eye.monotonic_ns / 1e9, now, eye.valid)
+            if self.head_position_mode == "native":
+                self.translation_source = corrected.status
+                return corrected.position
+        estimator = getattr(self, "head_position", None)
+        if estimator is None:
+            return native
+        sample = self.latest_mediapipe
+        eye = self.latest
+        eye_depth = None
+        now = time.monotonic()
+        if (eye is not None and eye.valid and 20 < eye.eye_distance <= 100
+                and 0 <= now - eye.monotonic_ns / 1e9 < .1):
+            eye_depth = eye.center[2]
+        neutral = all(
+            reference is not None and abs(angle_delta_deg(value, reference)) < 5.0
+            for value, reference in zip((sample.yaw, sample.pitch, sample.roll),
+                                       (self.mediapipe_yaw_neutral, self.mediapipe_pitch_neutral, self.mediapipe_roll_neutral))
+        )
+        candidate = estimator.update(sample.matrix, sample.seen_monotonic, now,
+                                     eye_depth_mm=eye_depth, neutral_angles=neutral)
+        if self.head_position_mode == "shadow":
+            return native
+        self.translation_source = "held face reference" if estimator.status.startswith("held:") else "MediaPipe head reference"
+        return candidate
 
     def mediapipe_fallback_pose(self, use_handoff: bool = True) -> EyePose | None:
+        now = time.monotonic()
         corrected_yaw = self.corrected_mediapipe_yaw()
         corrected_pitch = self.corrected_mediapipe_pitch()
         corrected_roll = self.corrected_mediapipe_roll()
         if corrected_yaw is None and corrected_pitch is None and corrected_roll is None:
+            if (
+                self.args.tobii_head_pose_source == "face"
+                and self.last_mediapipe_pose is not None
+                and now - self.last_mediapipe_pose_monotonic <= self.args.mediapipe_pose_hold_s
+            ):
+                self.pitch_debug_status = "mediapipe source hold"
+                return self.last_mediapipe_pose
             return None
         base = self.pose if self.pose is not None else self.raw_pose
         if base is None:
@@ -2533,11 +2730,8 @@ class EyePoseDashboard:
             corrected_yaw += self.face_handoff_yaw_bias
         if use_handoff and corrected_pitch is not None:
             corrected_pitch += self.face_handoff_pitch_bias
-        translation = self.eye_origin_translation()
-        if translation is None:
-            translation = self.corrected_mediapipe_translation()
-        tx, ty, tz = translation if translation is not None else (base.tx, base.ty, base.tz)
-        return EyePose(
+        tx, ty, tz = self.head_translation()
+        pose = EyePose(
             yaw=corrected_yaw if corrected_yaw is not None else base.yaw,
             pitch_proxy=corrected_pitch if corrected_pitch is not None else base.pitch_proxy,
             roll=corrected_roll if corrected_roll is not None else base.roll,
@@ -2547,6 +2741,11 @@ class EyePoseDashboard:
             eye_distance=base.eye_distance,
             eye_distance_delta=base.eye_distance_delta,
         )
+        self.last_mediapipe_pose = pose
+        self.last_mediapipe_pose_monotonic = self.latest_mediapipe.seen_monotonic
+        sample = self.latest_mediapipe
+        self.last_mediapipe_pose_confidence = sample.confidence if sample is not None else 0.75
+        return pose
 
     def sample_rate(self) -> float:
         if len(self.packet_times) < 2:
@@ -2822,19 +3021,17 @@ class EyePoseDashboard:
         row_y += 8
         slider_h = max(120, h - (row_y - y) - 82)
         controls = [
-            ("yaw", "opentrack_yaw_scale", -30.0, 30.0, 0.25, BLUE, "{:+.2f}"),
-            ("pitch", "opentrack_pitch_scale", -30.0, 30.0, 0.25, YELLOW, "{:+.2f}"),
-            ("roll", "opentrack_roll_scale", -8.0, 8.0, 0.25, BLUE, "{:+.2f}"),
-            ("x", "opentrack_x_scale", -20.0, 20.0, 0.5, BLUE, "{:+.1f}"),
-            ("y", "opentrack_y_scale", -20.0, 20.0, 0.5, BLUE, "{:+.1f}"),
-            ("z", "opentrack_z_scale", -20.0, 20.0, 0.5, BLUE, "{:+.1f}"),
+            ("yaw", "opentrack_yaw_scale", -3.0, 3.0, 0.01, BLUE, "{:.2f}"),
+            ("pitch", "opentrack_pitch_scale", -3.0, 3.0, 0.01, YELLOW, "{:.2f}"),
+            ("roll", "opentrack_roll_scale", -3.0, 3.0, 0.01, BLUE, "{:.2f}"),
+            ("x", "opentrack_x_scale", -3.0, 3.0, 0.01, BLUE, "{:.2f}"),
+            ("y", "opentrack_y_scale", -3.0, 3.0, 0.01, BLUE, "{:.2f}"),
+            ("z", "opentrack_z_scale", -3.0, 3.0, 0.01, BLUE, "{:.2f}"),
             ("yaw curve", "opentrack_yaw_curve", 1.0, 4.0, 0.02, BLUE, "{:.2f}"),
             ("pitch curve", "opentrack_pitch_curve", 1.0, 4.0, 0.02, YELLOW, "{:.2f}"),
-            ("mp yaw", "mediapipe_yaw_output_scale", 0.01, 1.00, 0.01, BLUE, "{:.2f}"),
-            ("mp pitch", "mediapipe_pitch_output_scale", 0.01, 1.00, 0.01, YELLOW, "{:.2f}"),
-            ("mp roll", "mediapipe_roll_output_scale", 0.01, 1.00, 0.01, BLUE, "{:.2f}"),
-            ("fb trans", "mediapipe_translation_output_scale", 0.0, 50.0, 0.5, GREEN, "{:.1f}"),
-            ("fb depth", "mediapipe_depth_output_scale", 0.0, 800.0, 10.0, GREEN, "{:.0f}"),
+            ("mp yaw", "mediapipe_yaw_output_scale", -3.0, 3.0, 0.01, BLUE, "{:.2f}"),
+            ("mp pitch", "mediapipe_pitch_output_scale", -3.0, 3.0, 0.01, YELLOW, "{:.2f}"),
+            ("mp roll", "mediapipe_roll_output_scale", -3.0, 3.0, 0.01, BLUE, "{:.2f}"),
             ("mp p/y", "mediapipe_pitch_yaw_comp", 0.00, 3.00, 0.05, YELLOW, "{:.2f}"),
             ("knee", "opentrack_curve_knee_deg", 5.0, 90.0, 1.0, BLUE, "{:.0f}"),
             ("smooth", "opentrack_output_smoothing", 0.03, 0.50, 0.01, GREEN, "{:.2f}"),
@@ -2843,7 +3040,6 @@ class EyePoseDashboard:
             ("dampen", "opentrack_stillness_deadband_deg", 0.00, 0.80, 0.02, GREEN, "{:.2f}"),
             ("angle guard", "opentrack_max_angle_step", 5.00, 180.00, 5.00, GREEN, "{:.0f}"),
             ("out cap", "opentrack_max_output_angle", 20.00, 360.00, 5.00, GREEN, "{:.0f}"),
-            ("trans step", "opentrack_max_translation_step", 0.05, 1.50, 0.05, GREEN, "{:.2f}"),
             ("blink hold", "blink_hold_s", 0.00, 0.60, 0.02, GREEN, "{:.2f}"),
         ]
         max_controls = max(6, min(len(controls), int(slider_h // 30) * 2))
@@ -3072,9 +3268,9 @@ class EyePoseDashboard:
         color: str,
         fmt: str = "{:+.2f}",
     ) -> float:
-        value = float(getattr(self.args, attr))
-        value = clamp(value, min_value, max_value)
-        setattr(self.args, attr, value)
+        value = tuning_multiplier(attr, float(getattr(self.args, attr)))
+        # Drawing must not modify a loaded setting, including custom values
+        # outside the visible slider range. Only a deliberate edit changes it.
 
         compact = w < 300
         label_w = 72 if compact else 112
@@ -3096,7 +3292,7 @@ class EyePoseDashboard:
             updated = min_value + slider_ratio * (max_value - min_value)
             if step > 0:
                 updated = round(updated / step) * step
-            setattr(self.args, attr, clamp(updated, min_value, max_value))
+            setattr(self.args, attr, tuning_physical_value(attr, clamp(updated, min_value, max_value)))
             self.save_tuning()
 
         self.click_targets.append((slider_x - 10, y, slider_x + slider_w + 10, y + 28, set_value))
@@ -3106,7 +3302,7 @@ class EyePoseDashboard:
         tuning_file = getattr(self.args, "tuning_file", None)
         if tuning_file is None:
             return
-        data: dict[str, float | str] = {}
+        data: dict[str, float | str] = {"tuning_version": 2}
         for attr in TUNING_ATTRS:
             if not hasattr(self.args, attr):
                 continue
@@ -3114,7 +3310,7 @@ class EyePoseDashboard:
             if attr in ("harness", "tobii_roll_source", "tobii_head_pose_source"):
                 data[attr] = str(value)
             else:
-                data[attr] = float(value)
+                data[attr] = tuning_multiplier(attr, float(value))
         try:
             tuning_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = tuning_file.with_suffix(tuning_file.suffix + ".tmp")
@@ -3209,6 +3405,8 @@ class EyePoseDashboard:
         self.section(x, y, "CALIBRATION")
         y += 24
         self.value_line(x, y, "head neutral", "Space/c recenters")
+        y += 26
+        self.value_line(x, y, "position", self.translation_source)
         y += 26
         if self.screen_profile is None:
             self.value_line(x, y, "screen", "not calibrated")
@@ -3335,6 +3533,16 @@ def build_hq_frame_worker(root_dir: Path, skip_build: bool) -> None:
         subprocess.run(["make", "build/tobii-uvc-probe"], cwd=root_dir, check=True)
 
 
+def write_runtime_pidfile(root_dir: Path, name: str, pid: int) -> None:
+    runtime_dir = Path(os.environ.get("SC_TOBII_NATIVE_RUNTIME_DIR", root_dir / ".tmp" / "sc-tobii-native-runtime"))
+    pid_dir = runtime_dir / "pids"
+    try:
+        pid_dir.mkdir(parents=True, exist_ok=True)
+        (pid_dir / f"{name}.pid").write_text(f"{pid}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def load_tuning(args: argparse.Namespace) -> None:
     tuning_file = getattr(args, "tuning_file", None)
     if tuning_file is None or not tuning_file.exists():
@@ -3345,6 +3553,10 @@ def load_tuning(args: argparse.Namespace) -> None:
         return
     if not isinstance(data, dict):
         return
+    version = data.get("tuning_version", 1)
+    if version not in (1, 2):
+        print(f"ignoring unsupported tuning version: {version}")
+        return
     for attr in TUNING_ATTRS:
         value = data.get(attr)
         if attr == "harness" and value in ("tobii", "trackir"):
@@ -3354,9 +3566,8 @@ def load_tuning(args: argparse.Namespace) -> None:
         elif attr == "tobii_head_pose_source" and value in ("face", "blend", "eye"):
             setattr(args, attr, value)
         elif isinstance(value, (int, float)):
-            setattr(args, attr, float(value))
-
-
+            physical = tuning_physical_value(attr, float(value)) if version == 2 else float(value)
+            setattr(args, attr, physical)
 def load_window_geometry(args: argparse.Namespace) -> str:
     state_file = getattr(args, "window_state_file", None)
     if state_file is None or not state_file.exists():
@@ -3386,8 +3597,12 @@ def main() -> int:
     parser.add_argument("--windowed", action="store_true", default=True, help="Run in a window. This is the default.")
     parser.add_argument("--fullscreen", action="store_true", help="Run fullscreen.")
     parser.add_argument("--headless", action="store_true", help="Run the bridge without showing the dashboard window.")
+    parser.add_argument("--head-position-mode", choices=("auto", "eye", "shadow", "face", "native", "native-shadow"), default="auto", help="Prefer validated native compensation; eye disables compensation; shadow records candidates without applying them.")
+    parser.add_argument("--native-head-position-profile", type=Path, default=repo_root() / ".tmp" / "sc-tobii-native-runtime" / "native-head-position.json", help="Native eye/rotation reference profile.")
+    parser.add_argument("--head-position-profile", type=Path, default=repo_root() / ".tmp" / "sc-tobii-native-runtime" / "head-position.json", help="Validated head-reference calibration profile.")
+    parser.add_argument("--tracking-trace", type=Path, default=Path(os.environ["SC_TOBII_TRACKING_TRACE"]) if os.environ.get("SC_TOBII_TRACKING_TRACE") else None, help="Record numeric pose/gaze inputs and output packets to JSONL for offline replay.")
     parser.add_argument("--skip-build", action="store_true")
-    parser.add_argument("--startup", choices=("public", "tobiifree"), default="tobiifree")
+    parser.add_argument("--startup", choices=("native",), default="native")
     parser.add_argument("--display-area", choices=("none", "big", "rect"), default="big")
     parser.add_argument("--sensor-distance-mm", type=float, default=25.0 * 25.4, help="Natural seated distance from sensor. Default is 25 inches.")
     parser.add_argument("--baseline-samples", type=int, default=36)
@@ -3435,22 +3650,23 @@ def main() -> int:
     parser.add_argument("--mediapipe-preprocess", choices=("raw", "stretch", "clahe"), default="clahe")
     parser.add_argument("--mediapipe-upscale", type=float, default=1.0)
     parser.add_argument("--mediapipe-rotation-mode", choices=("forward", "euler"), default="forward", help="MediaPipe transform decomposition. forward preserves pitch better during combined yaw/pitch; euler is the old mode.")
-    parser.add_argument("--mediapipe-pose-source", choices=("matrix", "landmark-normal", "hybrid"), default="hybrid", help="MediaPipe pose source. hybrid keeps matrix yaw/roll and uses landmark-plane pitch for combined yaw/pitch stability.")
+    parser.add_argument("--mediapipe-pose-source", choices=("matrix", "landmark-normal", "hybrid"), default="hybrid", help="MediaPipe pose source. hybrid keeps matrix yaw/roll and continuously averages matrix and landmark-plane pitch.")
     parser.add_argument("--mediapipe-min-detection-confidence", type=float, default=0.35)
     parser.add_argument("--mediapipe-min-presence-confidence", type=float, default=0.35)
     parser.add_argument("--mediapipe-min-tracking-confidence", type=float, default=0.35)
     parser.add_argument("--mediapipe-min-face-confidence", type=float, default=0.35)
     parser.add_argument("--mediapipe-max-age-s", type=float, default=0.35)
+    parser.add_argument("--mediapipe-pose-hold-s", type=float, default=0.55, help="Keep the last good MediaPipe pose through brief face-tracking gaps before falling back.")
     parser.add_argument("--mediapipe-yaw-sign", type=float, default=1.0)
     parser.add_argument("--mediapipe-pitch-sign", type=float, default=1.0)
     parser.add_argument("--mediapipe-roll-sign", type=float, default=1.0)
-    parser.add_argument("--mediapipe-yaw-output-scale", type=float, default=0.15, help="Scale MediaPipe yaw before Star Citizen gain/curve output.")
-    parser.add_argument("--mediapipe-pitch-output-scale", type=float, default=0.10, help="Scale MediaPipe pitch before Star Citizen gain/curve output.")
-    parser.add_argument("--mediapipe-roll-output-scale", type=float, default=0.15, help="Scale MediaPipe roll before Star Citizen gain output.")
-    parser.add_argument("--mediapipe-translation-output-scale", type=float, default=10.0, help="Scale MediaPipe face translation before Star Citizen x/y/z gain output.")
-    parser.add_argument("--mediapipe-depth-output-scale", type=float, default=250.0, help="Scale MediaPipe face-size depth before Star Citizen z gain output.")
-    parser.add_argument("--eye-origin-z-deadband-mm", type=float, default=1.0, help="Use MediaPipe depth fallback when eye-origin z is inside this neutral deadband.")
-    parser.add_argument("--mediapipe-pitch-yaw-comp", type=float, default=1.0, help="Compensate MediaPipe pitch attenuation as yaw increases. 0 disables.")
+    parser.add_argument("--mediapipe-yaw-output-scale", type=float, default=DEFAULT_TUNING_VALUES["mediapipe_yaw_output_scale"], help="Scale MediaPipe yaw before Star Citizen gain/curve output.")
+    parser.add_argument("--mediapipe-pitch-output-scale", type=float, default=DEFAULT_TUNING_VALUES["mediapipe_pitch_output_scale"], help="Scale MediaPipe pitch before Star Citizen gain/curve output.")
+    parser.add_argument("--mediapipe-roll-output-scale", type=float, default=DEFAULT_TUNING_VALUES["mediapipe_roll_output_scale"], help="Scale MediaPipe roll before Star Citizen gain output.")
+    parser.add_argument("--mediapipe-translation-output-scale", type=float, default=10.0, help="Deprecated compatibility option; face translation is no longer used.")
+    parser.add_argument("--mediapipe-depth-output-scale", type=float, default=250.0, help="Deprecated compatibility option; face-size depth is no longer used.")
+    parser.add_argument("--eye-origin-z-deadband-mm", type=float, default=1.0, help="Deprecated compatibility option; valid zero depth is preserved.")
+    parser.add_argument("--mediapipe-pitch-yaw-comp", type=float, default=0.0, help="Optional experimental pitch amplification as yaw increases. Disabled by default.")
     parser.add_argument("--harness", choices=("tobii", "trackir"), default="tobii", help="Default Star Citizen output harness.")
     parser.add_argument("--tobii-head-pose-source", choices=("face", "blend", "eye"), default="face", help="Live head-pose source for native Tobii output. Face uses MediaPipe primary; blend keeps eye-origin primary with face fallback.")
     parser.add_argument(
@@ -3471,12 +3687,12 @@ def main() -> int:
     parser.add_argument("--opentrack-x-sign", type=float, default=1.0)
     parser.add_argument("--opentrack-y-sign", type=float, default=1.0)
     parser.add_argument("--opentrack-z-sign", type=float, default=1.0)
-    parser.add_argument("--opentrack-yaw-scale", type=float, default=5.0)
-    parser.add_argument("--opentrack-pitch-scale", type=float, default=-7.25)
-    parser.add_argument("--opentrack-roll-scale", type=float, default=-8.0)
-    parser.add_argument("--opentrack-x-scale", type=float, default=-3.0)
-    parser.add_argument("--opentrack-y-scale", type=float, default=3.0)
-    parser.add_argument("--opentrack-z-scale", type=float, default=4.0)
+    parser.add_argument("--opentrack-yaw-scale", type=float, default=DEFAULT_TUNING_VALUES["opentrack_yaw_scale"])
+    parser.add_argument("--opentrack-pitch-scale", type=float, default=DEFAULT_TUNING_VALUES["opentrack_pitch_scale"])
+    parser.add_argument("--opentrack-roll-scale", type=float, default=DEFAULT_TUNING_VALUES["opentrack_roll_scale"])
+    parser.add_argument("--opentrack-x-scale", type=float, default=DEFAULT_TUNING_VALUES["opentrack_x_scale"])
+    parser.add_argument("--opentrack-y-scale", type=float, default=DEFAULT_TUNING_VALUES["opentrack_y_scale"])
+    parser.add_argument("--opentrack-z-scale", type=float, default=DEFAULT_TUNING_VALUES["opentrack_z_scale"])
     parser.add_argument("--opentrack-output-smoothing", type=float, default=0.03, help="Stationary EMA alpha for values sent to TrackIR. Lower is smoother.")
     parser.add_argument("--opentrack-motion-smoothing", type=float, default=0.05, help="EMA alpha used during deliberate movement. Higher is more responsive.")
     parser.add_argument("--opentrack-prediction-ms", type=float, default=45.0, help="Output lookahead used to fill motion between sensor samples.")
@@ -3485,12 +3701,42 @@ def main() -> int:
     parser.add_argument("--opentrack-send-hz", type=float, default=120.0, help="Fixed-rate UDP pose packet cadence.")
     parser.add_argument("--opentrack-max-angle-step", type=float, default=180.0, help="Emergency max degrees per 60 Hz frame sent to TrackIR.")
     parser.add_argument("--opentrack-max-output-angle", type=float, default=160.0, help="Final safety clamp for yaw/pitch/roll packets sent to the bridge.")
-    parser.add_argument("--opentrack-max-translation-step", type=float, default=0.20, help="Max centimeters per UI tick sent to TrackIR.")
-    parser.add_argument("--opentrack-yaw-curve", type=float, default=1.0, help="Power curve for TrackIR yaw output. 1.0 is linear.")
-    parser.add_argument("--opentrack-pitch-curve", type=float, default=2.0, help="Power curve for TrackIR pitch output. 1.0 is linear.")
+    parser.add_argument("--opentrack-max-translation-step", type=float, default=0.20, help="Deprecated compatibility option; translation now uses a time-based filter.")
+    parser.add_argument("--opentrack-yaw-curve", type=float, default=DEFAULT_TUNING_VALUES["opentrack_yaw_curve"], help="Power curve for TrackIR yaw output. 1.0 is linear.")
+    parser.add_argument("--opentrack-pitch-curve", type=float, default=DEFAULT_TUNING_VALUES["opentrack_pitch_curve"], help="Power curve for TrackIR pitch output. 1.0 is linear (default).")
     parser.add_argument("--opentrack-curve-knee-deg", type=float, default=18.0, help="Output angle where the power curve roughly matches linear response.")
     args = parser.parse_args()
     load_tuning(args)
+    # Validate before acquiring USB or starting worker/UI processes.
+    args.native_head_calibration = None
+    if args.head_position_mode in ("auto", "native", "native-shadow", "shadow") and args.native_head_position_profile.exists():
+        try:
+            args.native_head_calibration = NativeHeadProfile.load(args.native_head_position_profile)
+            if args.mediapipe_image_stream.lower().removeprefix("0x") != args.native_head_calibration.image_stream:
+                raise ValueError("native profile uses a different image stream")
+            if args.head_position_mode == "native":
+                args.native_head_calibration.require_live()
+            elif args.head_position_mode == "auto":
+                args.head_position_mode = "native" if args.native_head_calibration.validation.get("live_approved") is True else "native-shadow"
+        except (ValueError, TypeError, OSError) as exc:
+            parser.error(f"invalid native head-position profile: {exc}")
+    elif args.head_position_mode in ("native", "native-shadow"):
+        parser.error(f"native compensation requires {args.native_head_position_profile}")
+    args.head_position_calibration = None
+    if args.head_position_mode in ("auto", "face", "shadow") and args.head_position_profile.exists():
+        try:
+            args.head_position_calibration = HeadPositionProfile.load(args.head_position_profile)
+            if args.mediapipe_image_stream.lower().removeprefix("0x") != args.head_position_calibration.image_stream:
+                raise ValueError("profile uses a different image stream")
+            if args.head_position_mode == "face":
+                args.head_position_calibration.require_live()
+            elif args.head_position_mode == "auto" and args.head_position_calibration.validation.get("live_approved") is not True:
+                args.head_position_mode = "shadow"
+                print("head_position=shadow_only (profile lacks passing bidirectional validation)")
+        except (ValueError, TypeError, OSError) as exc:
+            parser.error(f"invalid head-position profile: {exc}")
+    elif args.head_position_mode == "face":
+        parser.error(f"calibrated face position requires {args.head_position_profile}")
     args.frame_face_tracking = True
 
     root_dir = repo_root()
@@ -3592,6 +3838,7 @@ def main() -> int:
         start_new_session=True,
     )
     log_file.close()
+    write_runtime_pidfile(root_dir, "mux", proc.pid)
     if mediapipe_bridge is not None and proc.stdout is not None:
         mediapipe_bridge.attach_mux_stdout(proc.stdout)
 
