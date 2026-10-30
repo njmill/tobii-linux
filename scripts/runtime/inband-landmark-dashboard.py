@@ -376,7 +376,7 @@ class MediaPipeWorkerClient:
             return
         cmd = [
             str(self.args.mediapipe_python),
-            str(ROOT / "scripts" / "recon" / "mediapipe-face-worker.py"),
+            str(ROOT / "scripts" / "runtime" / "mediapipe-face-worker.py"),
             "--model",
             str(self.args.mediapipe_model),
             "--preprocess",

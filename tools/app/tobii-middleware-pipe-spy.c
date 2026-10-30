@@ -572,6 +572,8 @@ static DWORD WINAPI synthetic_headpose_worker(LPVOID arg)
     uint32_t seq = 1;
     int phase = 0;
     int live_was_active = 0;
+    struct PosePacket held_pose;
+    memset(&held_pose, 0, sizeof(held_pose));
     DWORD sleep_ms = sesp_synthetic_headpose_hz ? (DWORD)(1000U / sesp_synthetic_headpose_hz) : 33;
     if (sleep_ms < 5)
         sleep_ms = 5;
@@ -588,7 +590,14 @@ static DWORD WINAPI synthetic_headpose_worker(LPVOID arg)
         float pos_z = 600.0f;
         struct PosePacket live;
         int live_active = snapshot_live_pose(&live, 750);
-        if (live_active) {
+        if (live_active)
+            held_pose = live;
+        if (live_active || sesp_headpose_udp_port) {
+            /* A configured live producer must never turn into a test waveform
+             * when tracking stops. Hold its last pose (neutral before first).
+             * Synthetic motion remains available for explicit non-UDP probes.
+             */
+            live = held_pose;
             const double deg_to_rad = 3.14159265358979323846 / 180.0;
             pos_x = (float)(live.x_cm * 10.0);
             pos_y = (float)(live.y_cm * 10.0);
@@ -596,11 +605,11 @@ static DWORD WINAPI synthetic_headpose_worker(LPVOID arg)
             yaw = (float)(live.yaw_deg * deg_to_rad);
             pitch = (float)(live.pitch_deg * deg_to_rad);
             roll = (float)(live.roll_deg * deg_to_rad);
-            if (!live_was_active)
+            if (live_active && !live_was_active)
                 log_line("sesp_headpose_live_source active port=%lu", (unsigned long)sesp_headpose_udp_port);
-        } else if (live_was_active) {
-            log_line("sesp_headpose_live_source stale fallback=synthetic");
         }
+        if (!live_active && live_was_active)
+            log_line("sesp_headpose_live_source stale fallback=hold");
         live_was_active = live_active;
         DWORD frame_len = 0;
         unsigned char *frame = make_sesp_subscription_headpose(
@@ -625,7 +634,7 @@ static DWORD WINAPI synthetic_headpose_worker(LPVOID arg)
                 log_line("sesp_synthetic_headpose seq=%lu bytes=%lu mode=%s yaw=%.3f pitch=%.3f roll=%.3f",
                          (unsigned long)(seq - 1),
                          (unsigned long)wrote,
-                         live_active ? "live" : "synthetic",
+                         live_active ? "live" : (sesp_headpose_udp_port ? "held" : "synthetic"),
                          yaw,
                          pitch,
                          roll);

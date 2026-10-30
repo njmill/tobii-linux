@@ -36,7 +36,7 @@
 #define STREAM_IMAGE_PRIMARY 0x050e
 #define STREAM_SYNC 0x1771
 
-#define DEFAULT_IMAGE_OUT "captures/ttp-mux/frames"
+#define DEFAULT_IMAGE_OUT ".tmp/captures/ttp-mux/frames"
 
 #define READ_BUFFER_BYTES 16384
 #define ACC_BUFFER_BYTES (2 * 1024 * 1024)
@@ -124,8 +124,9 @@ static int mkdir_p_one(const char *path) {
 }
 
 static int ensure_default_output_dirs(void) {
-    if (mkdir_p_one("captures") != 0) return -1;
-    if (mkdir_p_one("captures/gaze-native") != 0) return -1;
+    if (mkdir_p_one(".tmp") != 0) return -1;
+    if (mkdir_p_one(".tmp/captures") != 0) return -1;
+    if (mkdir_p_one(".tmp/captures/gaze-native") != 0) return -1;
     return 0;
 }
 
@@ -135,7 +136,7 @@ static int make_default_csv_path(char *out, size_t out_size, const char *label) 
     if (localtime_r(&now, &local_tm) == NULL) return -1;
     int written = snprintf(out,
                            out_size,
-                           "captures/gaze-native/%04d%02d%02d-%02d%02d%02d-%s.csv",
+                           ".tmp/captures/gaze-native/%04d%02d%02d-%02d%02d%02d-%s.csv",
                            local_tm.tm_year + 1900,
                            local_tm.tm_mon + 1,
                            local_tm.tm_mday,

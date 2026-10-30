@@ -3,7 +3,7 @@
 	sc-tobii-stock-runtime-dashboard sc-tobii-stock-runtime-headless \
 	sc-tobii-stock-runtime-status sc-tobii-stock-runtime-clear-logs \
 	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight sc-tobii-stock-install-launch-hook \
-	sc-tobii-stock-disable-launch-hook sc-tobii-stock-window-probe wine-window-probe-build \
+	sc-tobii-stock-disable-launch-hook \
 	mediapipe-python mediapipe-venv mediapipe-fetch-model \
 	install-launch-hook disable-launch-hook install-udev-rule diag clean
 
@@ -22,7 +22,7 @@ OPENSSL_LIBS := $(shell pkg-config --libs openssl 2>/dev/null)
 
 all: build/tobii-ttp-mux $(SC_TOBII_STOCK_RECON_DIR)/tobii-middleware-pipe-spy.exe
 
-build/tobii-ttp-mux: tools/probes/tobii-ttp-mux.c
+build/tobii-ttp-mux: tools/app/tobii-ttp-mux.c
 	mkdir -p build
 	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) $(OPENSSL_CFLAGS) -o $@ $< $(LIBUSB_LIBS) $(OPENSSL_LIBS)
 
@@ -30,28 +30,19 @@ $(SC_TOBII_STOCK_RECON_DIR)/tobii-middleware-pipe-spy.exe: tools/app/tobii-middl
 	mkdir -p "$(SC_TOBII_STOCK_RECON_DIR)"
 	$(MINGW64_CC) -O2 -Wall -Wextra -o "$@" "$<" -lws2_32
 
-$(SC_TOBII_STOCK_RECON_DIR)/wine-window-probe.exe: tools/app/wine-window-probe.c
-	mkdir -p "$(SC_TOBII_STOCK_RECON_DIR)"
-	$(MINGW64_CC) -O2 -Wall -Wextra -o "$@" "$<"
-
-wine-window-probe-build: $(SC_TOBII_STOCK_RECON_DIR)/wine-window-probe.exe
-
-sc-tobii-stock-window-probe: wine-window-probe-build
-	./scripts/app/run-wine-window-probe.sh
-
 mediapipe-python:
-	./scripts/recon/setup-mediapipe-python.sh
+	./scripts/runtime/setup-mediapipe-python.sh
 
 mediapipe-venv: $(MEDIAPIPE_READY)
 
-$(MEDIAPIPE_READY): requirements-mediapipe.txt scripts/recon/setup-mediapipe-venv.sh scripts/recon/mediapipe-face-worker.py
-	./scripts/recon/setup-mediapipe-venv.sh
+$(MEDIAPIPE_READY): requirements-mediapipe.txt scripts/runtime/setup-mediapipe-venv.sh scripts/runtime/mediapipe-face-worker.py
+	./scripts/runtime/setup-mediapipe-venv.sh
 	touch "$@"
 
 mediapipe-fetch-model: $(MEDIAPIPE_MODEL)
 
-$(MEDIAPIPE_MODEL): scripts/recon/fetch-mediapipe-face-landmarker.sh
-	./scripts/recon/fetch-mediapipe-face-landmarker.sh
+$(MEDIAPIPE_MODEL): scripts/runtime/fetch-mediapipe-face-landmarker.sh
+	./scripts/runtime/fetch-mediapipe-face-landmarker.sh
 
 preflight:
 	./scripts/app/check-sc-stock-tobii-dll.sh
@@ -67,11 +58,15 @@ runtime-clean: all mediapipe-venv mediapipe-fetch-model preflight
 	window_state_file="$${SC_WINDOW_STATE_FILE:-$$work_dir/sc-window.json}"; \
 	screen_calibration_file="$${SC_SCREEN_CALIBRATION_FILE:-$$work_dir/screen-calibration.json}"; \
 	gaze_calibration_file="$${SC_GAZE_CALIBRATION_FILE:-$$work_dir/gaze-calibration.json}"; \
+	native_head_position_file="$${SC_NATIVE_HEAD_POSITION_PROFILE:-$$work_dir/native-head-position.json}"; \
+	head_position_file="$${SC_HEAD_POSITION_PROFILE:-$$work_dir/head-position.json}"; \
 	echo "clearing runtime user settings and calibrations"; \
 	rm -f "$$tuning_file" "$$tuning_file.tmp" \
 	      "$$window_state_file" "$$window_state_file.tmp" \
 	      "$$screen_calibration_file" "$$screen_calibration_file.tmp" \
-	      "$$gaze_calibration_file" "$$gaze_calibration_file.tmp"
+	      "$$gaze_calibration_file" "$$gaze_calibration_file.tmp" \
+	      "$$head_position_file" "$$head_position_file.tmp" \
+	      "$$native_head_position_file" "$$native_head_position_file.tmp"
 	./scripts/app/run-sc-tobii-native-runtime.sh dashboard
 
 sc-tobii-stock-runtime-clean: runtime-clean

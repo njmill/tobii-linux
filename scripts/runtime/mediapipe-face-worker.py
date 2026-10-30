@@ -143,18 +143,15 @@ def landmark_normal_ypr(landmarks) -> tuple[float, float, float] | None:
 
 
 def hybrid_pitch(matrix_pitch: float, landmark_pitch: float) -> float:
-    # The two MediaPipe pose signals fail in different ways on the ET5 IR feed.
-    # Landmark-plane pitch tends to be steadier, but can lose magnitude when a
-    # strong yaw hides one side of the face. If both estimates agree on the
-    # direction, keep the stronger magnitude; if they disagree, prefer landmarks
-    # because they are tied directly to the visible mesh.
-    if not math.isfinite(matrix_pitch) or not math.isfinite(landmark_pitch):
+    # A sign/magnitude selector can jump by the entire matrix angle when the
+    # landmark estimate crosses zero (the camera's zero, not head neutral).
+    # Use a fixed blend so continuous inputs produce a continuous estimate.
+    # This removes the switch; physical accuracy still needs measured nods.
+    if not math.isfinite(matrix_pitch):
         return landmark_pitch
-    if matrix_pitch == 0.0 or landmark_pitch == 0.0:
-        return landmark_pitch
-    if math.copysign(1.0, matrix_pitch) == math.copysign(1.0, landmark_pitch):
-        return matrix_pitch if abs(matrix_pitch) > abs(landmark_pitch) else landmark_pitch
-    return landmark_pitch
+    if not math.isfinite(landmark_pitch):
+        return matrix_pitch
+    return 0.5 * matrix_pitch + 0.5 * landmark_pitch
 
 
 def stretch_gray(np, gray):
@@ -232,6 +229,8 @@ class FaceWorker:
             "timestamp_ms": timestamp_ms,
             "present": present,
             "latency_ms": elapsed,
+            "image_width": original_width,
+            "image_height": original_height,
             "preprocess": self.args.preprocess,
             "upscale": self.args.upscale,
             "landmarks": [],

@@ -491,19 +491,22 @@ echo "dashboard output defaults to Tobii; TrackIR fallback target is 127.0.0.1:$
 echo
 
 common_args=(
+  --head-position-mode "${SC_HEAD_POSITION_MODE:-auto}"
+  --native-head-position-profile "${SC_NATIVE_HEAD_POSITION_PROFILE:-$work_dir/native-head-position.json}"
+  --head-position-profile "${SC_HEAD_POSITION_PROFILE:-$work_dir/head-position.json}"
   --no-hq-frames --face-frame-hz "${SC_TOBII_FACE_FPS:-60}"
   --harness "${SC_TOBII_HARNESS:-tobii}"
   --tobii-udp "127.0.0.1:$tobii_udp_port"
   --trackir-udp "127.0.0.1:$trackir_udp_port"
   --opentrack-udp "127.0.0.1:$tobii_udp_port"
   --stock-gaze-udp "127.0.0.1:$middleware_udp_port"
-  --opentrack-yaw-scale "${SC_TOBII_YAW_SCALE:-8.0}"
-  --opentrack-pitch-scale "${SC_TOBII_PITCH_SCALE:--14.0}"
+  --opentrack-yaw-scale "${SC_TOBII_YAW_SCALE:-11.75}"
+  --opentrack-pitch-scale "${SC_TOBII_PITCH_SCALE:--8.25}"
   --opentrack-roll-scale "${SC_TOBII_ROLL_SCALE:-1.0}"
   --tobii-roll-source "${SC_TOBII_ROLL_SOURCE:-pose}"
-  --opentrack-x-scale "${SC_TOBII_X_SCALE:--3.0}"
-  --opentrack-y-scale "${SC_TOBII_Y_SCALE:-3.0}"
-  --opentrack-z-scale "${SC_TOBII_Z_SCALE:-4.0}"
+  --opentrack-x-scale "${SC_TOBII_X_SCALE:-0.0}"
+  --opentrack-y-scale "${SC_TOBII_Y_SCALE:--0.5}"
+  --opentrack-z-scale "${SC_TOBII_Z_SCALE:-1.0}"
   --opentrack-output-smoothing "${SC_TOBII_OUTPUT_SMOOTHING:-0.03}"
   --opentrack-motion-smoothing "${SC_TOBII_MOTION_SMOOTHING:-0.05}"
   --opentrack-prediction-ms "${SC_TOBII_PREDICTION_MS:-45.0}"
@@ -512,17 +515,14 @@ common_args=(
   --opentrack-send-hz "${SC_TOBII_SEND_HZ:-120.0}"
   --opentrack-max-angle-step "${SC_TOBII_MAX_ANGLE_STEP:-180.0}"
   --opentrack-max-translation-step "${SC_TOBII_MAX_TRANSLATION_STEP:-0.20}"
-  --opentrack-yaw-curve "${SC_TOBII_YAW_CURVE:-2.0}"
-  --opentrack-pitch-curve "${SC_TOBII_PITCH_CURVE:-2.0}"
+  --opentrack-yaw-curve "${SC_TOBII_YAW_CURVE:-1.0}"
+  --opentrack-pitch-curve "${SC_TOBII_PITCH_CURVE:-1.0}"
   --opentrack-curve-knee-deg "${SC_TOBII_CURVE_KNEE_DEG:-18.0}"
   --opentrack-max-output-angle "${SC_TOBII_MAX_OUTPUT_ANGLE:-160.0}"
-  --mediapipe-yaw-output-scale "${SC_TOBII_MEDIAPIPE_YAW_SCALE:-0.15}"
+  --mediapipe-yaw-output-scale "${SC_TOBII_MEDIAPIPE_YAW_SCALE:-0.08}"
   --mediapipe-pitch-output-scale "${SC_TOBII_MEDIAPIPE_PITCH_SCALE:-0.10}"
-  --mediapipe-roll-output-scale "${SC_TOBII_MEDIAPIPE_ROLL_SCALE:-0.15}"
-  --mediapipe-translation-output-scale "${SC_TOBII_MEDIAPIPE_TRANSLATION_SCALE:-10.0}"
-  --mediapipe-depth-output-scale "${SC_TOBII_MEDIAPIPE_DEPTH_SCALE:-250.0}"
-  --eye-origin-z-deadband-mm "${SC_TOBII_EYE_Z_DEADBAND_MM:-1.0}"
-  --mediapipe-pitch-yaw-comp "${SC_TOBII_MEDIAPIPE_PITCH_YAW_COMP:-1.0}"
+  --mediapipe-roll-output-scale "${SC_TOBII_MEDIAPIPE_ROLL_SCALE:-0.08}"
+  --mediapipe-pitch-yaw-comp "${SC_TOBII_MEDIAPIPE_PITCH_YAW_COMP:-0.0}"
   --mediapipe-rotation-mode "${SC_TOBII_MEDIAPIPE_ROTATION_MODE:-forward}"
   --mediapipe-pose-source "${SC_TOBII_MEDIAPIPE_POSE_SOURCE:-hybrid}"
   --blink-hold-s "${SC_TOBII_BLINK_HOLD_S:-0.20}"
@@ -556,13 +556,13 @@ case "$mode" in
     done
     ;;
   dashboard)
-    "$root_dir/scripts/recon/eye-pose-dashboard.py" "${common_args[@]}" &
+    "$root_dir/scripts/runtime/eye-pose-dashboard.py" "${common_args[@]}" &
     dashboard_pid=$!
     write_pidfile dashboard "$dashboard_pid"
     wait "$dashboard_pid"
     ;;
   headless)
-    "$root_dir/scripts/recon/eye-pose-dashboard.py" --headless "${common_args[@]}" &
+    "$root_dir/scripts/runtime/eye-pose-dashboard.py" --headless "${common_args[@]}" &
     dashboard_pid=$!
     write_pidfile dashboard "$dashboard_pid"
     wait "$dashboard_pid"

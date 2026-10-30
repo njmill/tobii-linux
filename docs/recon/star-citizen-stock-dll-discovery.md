@@ -1,5 +1,9 @@
 # Star Citizen Stock DLL Discovery
 
+> Historical discovery notes: the harness targets and window probe below are
+> research tooling, not supported targets in the current public Makefile. For
+> the working integration, see [runtime architecture](../integrations/star-citizen-stock-tobii-runtime-architecture.md).
+
 This note tracks the current stock-DLL adoption path. The goal is to make the
 unmodified `tobii_gameintegration_x64.dll` naturally adopt our Linux Tobii
 runtime without seeding the DLL's internal provider table, forcing a provider

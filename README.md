@@ -248,11 +248,46 @@ SC_BIN64="/path/with spaces/StarCitizen/LIVE/Bin64" ./install.sh
 - `make install-launch-hook` installs the helper launch hook.
 - `make disable-launch-hook` removes the helper launch hook.
 
-## Documentation
+## Repository Layout
+
+- `scripts/runtime/` contains the dashboard, tracking modules, MediaPipe worker,
+  landmark viewer, and Python/model setup helpers.
+- `scripts/app/` contains launch, compatibility-service, and setup diagnostic tools.
+- `tools/app/` contains the native USB reader and Wine compatibility-service sources.
+- `configs/` and `assets/` contain install configuration and the model checksum.
+- `docs/` contains architecture, diagrams, component descriptions, and technical notes for contributors.
+
+Generated files, personal settings/calibrations, logs, captures, and local research
+are kept outside version control under `.tmp/`, `.venv/`, or `build/`.
+
+## Movement Tuning
+
+The default gains use the tested movement baseline. A gain of `1.00` keeps that
+response, `0.50` halves it, and `2.00` doubles it. Zero disables an axis; negative
+gains reverse direction. X translation and pitch/yaw compensation start disabled.
+**Reset Tuning** restores these defaults. Restart the dashboard after updating.
+
+Native head-position compensation uses a personal profile at
+`.tmp/sc-tobii-native-runtime/native-head-position.json` when available. It combines
+Tobii eye position with MediaPipe rotation and holds position when a matching
+measurement is unavailable. Personal profiles are not distributed with the repo;
+without one, the runtime uses native eye-origin translation. To compare with
+uncompensated position, launch with `SC_HEAD_POSITION_MODE=eye make runtime`.
+
+## Developer Documentation
 
 - [Runtime architecture](docs/integrations/star-citizen-stock-tobii-runtime-architecture.md)
 - [Stock runtime diagram](docs/diagrams/star-citizen-stock-tobii-runtime.puml)
-- [Stock DLL discovery notes](docs/recon/star-citizen-stock-dll-discovery.md)
+- [Rendering diagrams](docs/diagrams/README.md)
+- [Component inventory](docs/integrations/component-inventory.md)
+- [Native eye position and rotation compensation](docs/integrations/native-head-position.md)
+- [Tracking consistency and investigation history](docs/integrations/tracking-consistency.md)
+- [MediaPipe head-position investigation](docs/integrations/head-position-estimator.md)
+- [Offline camera/face calibration investigation](docs/integrations/head-geometry-experiment.md)
+- [Historical stock DLL discovery notes](docs/recon/star-citizen-stock-dll-discovery.md)
+
+Research executables, tests, and generated artifacts remain under ignored `.tmp/`;
+their design notes and findings are retained here to explain the implementation.
 
 ## Acknowledgements
 
