@@ -36,9 +36,11 @@ awk -v begin="$tobii_begin" -v end="$tobii_end" '
 mv "$tmp" "$launch_script"
 chmod +x "$launch_script"
 
+"$root_dir/scripts/app/manage-tracking-service.py" stop
+
 pid_dir="$root_dir/.tmp/sc-tobii-native-runtime/pids"
 if [[ -d "$pid_dir" ]]; then
-  for name in dashboard mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
+  for name in dashboard engine mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
     pid_file="$pid_dir/$name.pid"
     [[ -f "$pid_file" ]] || continue
     pid="$(cat "$pid_file" 2>/dev/null || true)"

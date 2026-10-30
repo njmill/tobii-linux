@@ -18,6 +18,7 @@ install_desktop=1
 run_build=1
 run_sc_check=1
 install_launch_hook=1
+install_service=1
 dry_run=0
 
 usage() {
@@ -31,6 +32,7 @@ Options:
   --no-system-packages   Do not install distro packages.
   --no-udev              Do not install the Tobii udev rule.
   --no-desktop           Do not create the desktop/menu launcher.
+  --no-service           Do not register service autostart.
   --no-build             Do not run MediaPipe/model/build setup.
   --no-sc-check          Do not check the Star Citizen stock Tobii DLL.
   --no-launch-hook       Do not install/update the Star Citizen launch hook.
@@ -63,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --no-system-packages) install_system_packages=0 ;;
     --no-udev) install_udev=0 ;;
     --no-desktop) install_desktop=0 ;;
+    --no-service) install_service=0 ;;
     --no-build) run_build=0 ;;
     --no-sc-check) run_sc_check=0 ;;
     --no-launch-hook) install_launch_hook=0 ;;
@@ -106,13 +109,13 @@ detect_package_manager() {
 system_packages_for_pm() {
   case "$1" in
     apt)
-      echo build-essential make pkg-config libusb-1.0-0-dev libssl-dev mingw-w64 wine python3-tk python3-venv curl tar ca-certificates usbutils
+      echo build-essential make pkg-config libusb-1.0-0-dev libssl-dev mingw-w64 wine python3-tk python3-venv curl tar ca-certificates usbutils util-linux
       ;;
     dnf)
-      echo gcc gcc-c++ make pkgconf-pkg-config libusb1-devel openssl-devel mingw64-gcc wine python3-tkinter python3-virtualenv curl tar ca-certificates systemd-udev usbutils
+      echo gcc gcc-c++ make pkgconf-pkg-config libusb1-devel openssl-devel mingw64-gcc wine python3-tkinter python3-virtualenv curl tar ca-certificates systemd-udev usbutils util-linux
       ;;
     pacman)
-      echo base-devel pkgconf libusb openssl mingw-w64-gcc wine python tk curl tar ca-certificates usbutils
+      echo base-devel pkgconf libusb openssl mingw-w64-gcc wine python tk curl tar ca-certificates usbutils util-linux
       ;;
     *)
       echo
@@ -164,7 +167,7 @@ missing_system_packages() {
 
 check_build_deps() {
   local missing=0
-  local commands=(make cc pkg-config x86_64-w64-mingw32-gcc wine python3 curl tar sha256sum)
+  local commands=(make cc pkg-config x86_64-w64-mingw32-gcc wine python3 curl tar sha256sum flock)
   for cmd in "${commands[@]}"; do
     if ! need_cmd "$cmd"; then
       warn "missing command: $cmd"
@@ -378,7 +381,8 @@ install_sc_launch_hook() {
   status="$(launch_hook_status "$launch_script")"
   case "$status" in
     installed)
-      log "Star Citizen launch hook already installed"
+      log "Updating Star Citizen launch hook for the tracking service"
+      SC_BIN64="$bin64" "$root_dir/scripts/app/install-sc-tobii-native-launch-hook.sh"
       ;;
     missing)
       log "Installing Star Citizen launch hook"
@@ -409,6 +413,7 @@ print_preflight_report() {
   [[ "$install_udev" -eq 1 ]] && echo "  - install Tobii udev rule" || echo "  - skip Tobii udev rule"
   [[ "$run_build" -eq 1 ]] && echo "  - prepare MediaPipe/model and build helpers" || echo "  - skip MediaPipe/model/build setup"
   [[ "$install_desktop" -eq 1 ]] && echo "  - create application menu entry: $app_name" || echo "  - skip desktop/menu launcher"
+  [[ "$install_service" -eq 1 ]] && echo "  - register user-session tracking service" || echo "  - skip service autostart registration"
   [[ "$run_sc_check" -eq 1 ]] && echo "  - check Star Citizen stock Tobii DLL if detected" || echo "  - skip Star Citizen stock DLL check"
   [[ "$install_launch_hook" -eq 1 ]] && echo "  - install/update Star Citizen launch hook if detected" || echo "  - skip Star Citizen launch hook"
   echo
@@ -498,6 +503,7 @@ else
 fi
 
 if [[ "$run_build" -eq 1 ]]; then
+  "$root_dir/scripts/app/manage-tracking-service.py" stop
   setup_runtime
 else
   log "Skipping MediaPipe/model/build setup"
@@ -507,6 +513,11 @@ if [[ "$install_desktop" -eq 1 ]]; then
   write_desktop_launcher
 else
   log "Skipping desktop/menu launcher"
+fi
+
+if [[ "$install_service" -eq 1 ]]; then
+  log "Registering tracking service"
+  "$root_dir/scripts/app/manage-tracking-service.py" install
 fi
 
 log "Star Citizen detection"
@@ -540,9 +551,12 @@ Next steps:
        make runtime
      If the menu item does not appear to open, check:
        ${XDG_STATE_HOME:-$HOME/.local/state}/tobii-linux/dashboard.log
-  4. On first launch, complete screen calibration and gaze calibration.
+  4. Use Start Capture for initial screen/gaze calibration, then select Auto.
   5. Start Star Citizen and select Tobii for head tracking.
+     The dashboard can be closed while playing; the service owns tracking.
      If the dashboard works but SC does not, run:
        make status
+  6. For future updates, replace the source in this folder and run ./update.sh.
+     Full instructions: $root_dir/INSTALL.md
 
 EOF

@@ -59,16 +59,16 @@ The supervisor accepts:
 make runtime
 
 # Compare with uncompensated native eye position.
-SC_HEAD_POSITION_MODE=eye make runtime
+SC_HEAD_POSITION_MODE=eye make services
 
 # Record the candidate but continue sending uncompensated eye position.
-SC_HEAD_POSITION_MODE=native-shadow make runtime
+SC_HEAD_POSITION_MODE=native-shadow make services
 ```
 
 Override the file with `SC_NATIVE_HEAD_POSITION_PROFILE`. Explicit `native`
 requires a profile approved by the calibration checks; `native-shadow` can load
 a passing but shadow-only profile. `runtime-clean` removes this calibration too.
-Restart the dashboard after code/profile changes; no dashboard rebuild is needed.
+Restart the service after backend code/profile changes; the dashboard is a remote client.
 The startup log reports `head_position=native mode=native`. Translation status
 shows `native compensated head` or the reason the position is held.
 
@@ -119,13 +119,13 @@ mounting change may invalidate the alignment.
 
 ## Next live check
 
-Close the dashboard, relaunch with the saved profile, and recenter facing
+Restart the service with the saved profile, open the dashboard, and recenter facing
 forward. Compare down/up nods, deliberate leans, then nods while leaning. Also
 check yaw and roll for unwanted translation. Keep Star Citizen Input Mix at
 1.00 head for comparison. To record a fresh numeric trace:
 
 ```bash
-SC_TOBII_TRACKING_TRACE="$PWD/.tmp/native-head-comparison.jsonl" make runtime
+SC_TOBII_TRACKING_TRACE="$PWD/.tmp/native-head-comparison.jsonl" make services
 ```
 
 The trace includes the native eye observations, paired rotation, normalization,

@@ -22,8 +22,8 @@ static char display_name_override[128];
 static char display_device_id_override[256];
 static uint32_t display_width_override = 0;
 static uint32_t display_height_override = 0;
-static uint32_t registered_channel = 0;
-static char registered_client_name[MAX_PATH];
+static __thread uint32_t registered_channel = 0;
+static __thread char registered_client_name[MAX_PATH];
 static int sesp_synthetic_headpose = 0;
 static uint32_t sesp_synthetic_headpose_hz = 30;
 static uint32_t sesp_headpose_udp_port = 0;
@@ -31,6 +31,59 @@ static int sesp_provider_nudge = 0;
 static int etdefaultpipe_mode = 0;
 static int client_pipe_suffix_scan = 0;
 static char etdefaultpipe_entry[512] = "127.0.0.1";
+
+static void log_line(const char *fmt, ...);
+
+/* Requests belong to each command connection, not a global game identity. */
+static __thread unsigned capture_streams = 0;
+static volatile LONG capture_clients = 0;
+static volatile LONG capture_demand_running = 0;
+static DWORD capture_demand_port = 0;
+static HANDLE capture_demand_thread = NULL;
+
+static void capture_request(uint8_t type)
+{
+    unsigned before = capture_streams;
+    switch (type) {
+    case 4: capture_streams |= 1; break;  /* head pose start */
+    case 6: capture_streams &= ~1U; break;
+    default: break;
+    }
+    if (!before && capture_streams) InterlockedIncrement(&capture_clients);
+    if (before && !capture_streams) InterlockedDecrement(&capture_clients);
+}
+
+static DWORD WINAPI capture_demand_worker(LPVOID unused)
+{
+    (void)unused;
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa)) return 1;
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET) { WSACleanup(); return 1; }
+    struct sockaddr_in target;
+    memset(&target, 0, sizeof(target));
+    target.sin_family = AF_INET;
+    target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    target.sin_port = htons((unsigned short)capture_demand_port);
+    ULONGLONG epoch = GetTickCount64(), sequence = 0;
+    LONG previous = -1;
+    while (InterlockedCompareExchange(&capture_demand_running, 0, 0)) {
+        LONG count = InterlockedCompareExchange(&capture_clients, 0, 0);
+        char message[160];
+        int size = snprintf(message, sizeof(message), "tobii-demand-v1 sesp:%lu:%llu %llu %ld",
+            (unsigned long)GetCurrentProcessId(), (unsigned long long)epoch,
+            (unsigned long long)++sequence, (long)count);
+        sendto(sock, message, size, 0, (struct sockaddr *)&target, sizeof(target));
+        if (count != previous) {
+            log_line("capture_demand source=sesp clients=%ld", (long)count);
+            previous = count;
+        }
+        Sleep(200);
+    }
+    closesocket(sock);
+    WSACleanup();
+    return 0;
+}
 
 struct PosePacket {
     double x_cm;
@@ -913,6 +966,7 @@ static unsigned char *make_sesp_reply_from_request(const unsigned char *frame, D
         return NULL;
     if (out_req_type)
         *out_req_type = req_type;
+    capture_request(req_type);
     log_line("sesp_frame_decode seq=%lu type=%u payload_len=%lu", (unsigned long)seq, (unsigned)req_type, (unsigned long)payload_len);
 
     if (req_type == 2) {
@@ -959,19 +1013,19 @@ static void write_provider_nudge(HANDLE client, uint32_t base_seq)
     }
 }
 
-static void maybe_write_sesp_reply(HANDLE client, const unsigned char *buf, DWORD got)
+static int maybe_write_sesp_reply(HANDLE client, const unsigned char *buf, DWORD got)
 {
     if (!sesp_auto_reply)
-        return;
+        return 1;
 
     DWORD offset = 0;
     while (offset + 12 <= got) {
         if (memcmp(buf + offset, "sesp", 4) != 0)
-            return;
+            return 1;
         uint32_t payload_len = read_le32(buf + offset + 4);
         DWORD frame_len = 12 + payload_len;
         if (frame_len > got - offset)
-            return;
+            return 1;
 
         DWORD out_len = 0;
         uint8_t req_type = 0;
@@ -980,8 +1034,11 @@ static void maybe_write_sesp_reply(HANDLE client, const unsigned char *buf, DWOR
             DWORD wrote = 0;
             BOOL ok = WriteFile(client, out, out_len, &wrote, NULL);
             log_hex(ok ? "client_pipe_sesp_auto_reply" : "client_pipe_sesp_auto_reply_failed", out, wrote);
-            if (!ok)
+            if (!ok) {
                 log_line("client_pipe_sesp_auto_reply_error error=%lu", GetLastError());
+                free(out);
+                return 0;
+            }
             FlushFileBuffers(client);
         }
         free(out);
@@ -995,6 +1052,7 @@ static void maybe_write_sesp_reply(HANDLE client, const unsigned char *buf, DWOR
         }
         offset += frame_len;
     }
+    return 1;
 }
 
 static void serve_service_followup(HANDLE service_pipe, HANDLE client, uint32_t channel)
@@ -1015,7 +1073,8 @@ static void serve_service_followup(HANDLE service_pipe, HANDLE client, uint32_t 
         }
         total += got;
         log_hex("service_pipe_recv_followup", buf, got);
-        maybe_write_sesp_reply(client, buf, got);
+        if (!maybe_write_sesp_reply(client, buf, got))
+            return;
     }
 }
 
@@ -1420,6 +1479,10 @@ static DWORD WINAPI service_worker(LPVOID arg)
         serve_etdefaultpipe_once(pipe);
     else
         connect_client_pipe(pipe);
+    if (capture_streams) {
+        capture_streams = 0;
+        InterlockedDecrement(&capture_clients);
+    }
     DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
     return 0;
@@ -1487,6 +1550,8 @@ int main(int argc, char **argv)
             client_pipe_suffix_scan = 1;
         else if (!strcmp(argv[i], "--etdefault-entry") && i + 1 < argc)
             snprintf(etdefaultpipe_entry, sizeof(etdefaultpipe_entry), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--capture-demand-port") && i + 1 < argc)
+            capture_demand_port = (DWORD)strtoul(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--pipe") && i + 1 < argc)
             pipe_name = argv[++i];
     }
@@ -1524,7 +1589,16 @@ int main(int argc, char **argv)
         }
     }
 
-    while (GetTickCount64() < deadline) {
+    if (capture_demand_port) {
+        InterlockedExchange(&capture_demand_running, 1);
+        capture_demand_thread = CreateThread(NULL, 0, capture_demand_worker, NULL, 0, NULL);
+        if (!capture_demand_thread) {
+            log_line("capture_demand_thread_failed error=%lu", GetLastError());
+            return 1;
+        }
+        log_line("capture_demand_started port=%lu", (unsigned long)capture_demand_port);
+    }
+    while (seconds == 0 || GetTickCount64() < deadline) {
         HANDLE pipe = CreateNamedPipeA(
             pipe_name,
             etdefaultpipe_mode ? PIPE_ACCESS_DUPLEX : PIPE_ACCESS_INBOUND,
@@ -1562,6 +1636,11 @@ int main(int argc, char **argv)
         InterlockedExchange(&live_pose_udp_running, 0);
         WaitForSingleObject(live_pose_udp_thread, 1000);
         CloseHandle(live_pose_udp_thread);
+    }
+    InterlockedExchange(&capture_demand_running, 0);
+    if (capture_demand_thread) {
+        WaitForSingleObject(capture_demand_thread, 1000);
+        CloseHandle(capture_demand_thread);
     }
     if (live_pose_initialized)
         DeleteCriticalSection(&live_pose.lock);

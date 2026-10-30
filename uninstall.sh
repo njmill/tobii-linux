@@ -177,7 +177,7 @@ stop_runtime_helpers() {
   local pid_dir="$root_dir/.tmp/sc-tobii-native-runtime/pids"
   local name
   [[ -d "$pid_dir" ]] || return 0
-  for name in dashboard mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
+  for name in dashboard engine mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
     kill_pidfile "$pid_dir/$name.pid"
   done
 }
@@ -189,6 +189,7 @@ print_plan() {
   echo "package_manager=$pm"
   echo
   echo "Planned removals:"
+  echo "  - user tracking service/autostart entry"
   echo "  - desktop entry: $desktop_path"
   echo "  - launcher: $launcher_path"
   echo "  - build outputs: build/, .tmp/sc-tobii-stock-recon/"
@@ -218,6 +219,9 @@ if [[ "$dry_run" -eq 1 ]]; then
   echo "No changes were made."
   exit 0
 fi
+
+log "Stopping and unregistering tracking service"
+"$root_dir/scripts/app/manage-tracking-service.py" uninstall
 
 log "Stopping local Tobii runtime processes"
 stop_runtime_helpers

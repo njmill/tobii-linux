@@ -32,7 +32,7 @@ Common failure signs:
 ### `tools/app/tobii-ttp-mux.c`
 
 - **Built artifact:** `build/tobii-ttp-mux`
-- **Started by:** `eye-pose-dashboard.py`
+- **Started by:** `tracking_engine.py`
 - **Role:** Owns the native Tobii USB/TTP session and emits gaze/image data.
 - **Inputs:** USB interface 0 from the Tobii ET5.
 - **Outputs:**
@@ -49,17 +49,21 @@ Common failure signs:
 ### `scripts/runtime/eye-pose-dashboard.py`
 
 - **Started by:** `make runtime`, `make dashboard`, app-menu launcher.
-- **Role:** Main user-facing runtime UI and data producer.
-- **Responsibilities:**
-  - Starts/reads `tobii-ttp-mux`.
-  - Runs gaze calibration.
-  - Runs screen calibration.
-  - Runs MediaPipe head pose.
-  - Applies tuning sliders and smoothing.
-  - Sends live pose/gaze packets to compatibility services.
-- **UDP outputs:**
-  - `127.0.0.1:4243` for SESP head pose.
-  - `127.0.0.1:4457` for TCP middleware live gaze.
+- **Role:** Optional UI client of the background service.
+- **Responsibilities:** Renders status, tuning controls, and calibration windows;
+  sends validated commands over the private Unix socket. It does not own capture
+  or inference and does not send game packets.
+- **Lifetime:** Closing the window leaves the service and active tracking running.
+
+### `scripts/runtime/tracking-service.py` and `tracking_engine.py`
+
+- **Started by:** The user-session service through the runtime supervisor.
+- **Role:** Own native USB capture, inference, pose solving, calibration, settings,
+  filtering, and game-facing output. `tracking_core.py` holds shared helpers.
+- **Input demand:** SESP head-pose start/stop and TCP stream subscriptions through
+  `capture_control.py`; hardware remains idle when no client requests it.
+- **Control API:** User-private Unix socket; see [service architecture](tracking-service.md).
+- **UDP outputs:** `127.0.0.1:4243` for SESP head pose and `127.0.0.1:4457` for gaze.
 
 Runtime UDP packet format is `double[12]`:
 
@@ -86,9 +90,9 @@ Common failure signs:
 
 ### `scripts/runtime/mediapipe-face-worker.py`
 
-- **Started by:** `eye-pose-dashboard.py`
-- **Role:** Runs MediaPipe Face Landmarker outside the main dashboard process.
-- **Input:** Preprocessed in-band IR frames from the dashboard.
+- **Started by:** `tracking_engine.py`
+- **Role:** Runs MediaPipe Face Landmarker as a service-owned worker.
+- **Input:** Preprocessed in-band IR frames from the tracking engine.
 - **Output:** Face landmarks, pose estimate, confidence, latency.
 - **Environment:** `.venv/mediapipe` Python 3.11/3.12 virtual environment.
 - **Model:** `assets/mediapipe/face_landmarker.task`

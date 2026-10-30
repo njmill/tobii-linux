@@ -14,6 +14,8 @@ services that the stock DLL expects to discover.
 See also:
 
 - [Stock runtime diagram](../diagrams/star-citizen-stock-tobii-runtime.puml)
+- [Background service and dashboard](tracking-service.md)
+- [Client-driven capture lifecycle](client-driven-capture.md)
 - [Component inventory](component-inventory.md)
 - [Native eye position and rotation compensation](native-head-position.md)
 - [Stock DLL discovery notes](../recon/star-citizen-stock-dll-discovery.md)
@@ -23,7 +25,7 @@ See also:
 ```text
 Tobii ET5 USB
   -> tobii-ttp-mux
-  -> eye-pose-dashboard.py + MediaPipe
+  -> tracking-service.py + MediaPipe
   -> UDP pose/gaze packets
       -> Wine SESP pipe emulator for head pose
       -> TCP middleware emulator for gaze/presence/runtime discovery
@@ -52,25 +54,29 @@ current working runtime uses the gaze-safe in-band camera stream.
 
 `tobii-ttp-mux` is the native Linux USB/TTP reader. It owns the device-side
 protocol during runtime and provides a combined stream of gaze rows and in-band
-IR frames to the dashboard.
+IR frames to the tracking engine.
 
-The dashboard usually starts it indirectly. Users normally do not run the mux
+The service starts it only while capture is requested. Users normally do not run the mux
 by hand for Star Citizen testing.
+
+### `tracking-service.py` and `tracking_engine.py`
+
+The background service owns capture, MediaPipe, pose solving, calibration,
+filtering, settings, and both game-facing output paths. It starts idle and is
+independent of the dashboard. `tracking_core.py` provides shared runtime helpers
+without a Tk dependency.
+
+The service loads the existing personal profiles and tuning under
+`.tmp/sc-tobii-native-runtime/`, and sends live UDP pose/gaze packets to the
+compatibility services. It publishes status and accepts validated commands over
+its private Unix socket.
 
 ### `eye-pose-dashboard.py`
 
-The dashboard is the live control surface and producer for both game-facing
-data paths.
-
-It is responsible for:
-
-- Starting or consuming Tobii gaze and in-band image streams.
-- Running the selected face backend, currently MediaPipe.
-- Computing and tuning head pose.
-- Calibrating and displaying gaze.
-- Persisting quick tuning in `.tmp/sc-tobii-native-runtime/sc-tuning.json`.
-- Loading a personal native head-position profile from `.tmp/sc-tobii-native-runtime/native-head-position.json` when available.
-- Sending live UDP packets to the middleware services.
+The optional dashboard renders snapshots and sends capture, tuning, recenter,
+and calibration commands. Calibration sampling/calculation and persistence stay
+in the service. Closing or force-closing this client does not stop tracking for
+an active game. The landmark viewer is also a passive service client.
 
 With a validated personal profile, `native_head_position.py` combines binocular
 Tobii eye origins with time-matched MediaPipe rotation to compensate for the eye
@@ -84,6 +90,12 @@ calculation, validation results, and current limitations.
 use the tested movement baseline at `1.00`; legacy saved physical gains are
 supported through versioned tuning conversion. Research tools, tests, and local
 captures live under ignored `.tmp/development/` or other `.tmp/` directories.
+
+Capture starts idle and is controlled by supported SESP head-pose requests and
+TCP gaze/presence subscriptions. Compatibility endpoints stay available while
+capture is stopped. A loopback demand listener aggregates requests; the engine
+starts/stops its USB reader and inference workers. Manual Start/Stop override this
+policy until Auto is selected. See [capture lifecycle](client-driven-capture.md).
 
 The runtime packet is a little-endian `double[12]`:
 
@@ -117,7 +129,7 @@ MediaPipe is the current face landmark backend. It is run from a separate Python
 3.11/3.12 virtual environment because MediaPipe wheels are not available for the
 system Python 3.13 environment used on this machine.
 
-The dashboard sends preprocessed 280x280 IR frames to the MediaPipe worker and
+The engine sends preprocessed 280x280 IR frames to the MediaPipe worker and
 receives:
 
 - 478 face landmarks.
@@ -135,11 +147,11 @@ and fallback diagnostics.
 Common Make targets:
 
 - `make runtime` or `make sc-tobii-stock-runtime`
-  Starts services and the dashboard.
+  Ensures the background service is running and opens the dashboard client.
 - `make services` or `make sc-tobii-stock-runtime-services`
-  Starts only Wine-visible Tobii middleware services.
+  Restarts the tracking and compatibility service stack.
 - `make dashboard` or `make sc-tobii-stock-runtime-dashboard`
-  Starts only the dashboard side.
+  Connects the optional dashboard to the service.
 - `make status` or `make sc-tobii-stock-runtime-status`
   Runs the log analyzer.
 
@@ -162,12 +174,12 @@ It handles:
   - `0x0504` user presence.
   - `0x0500` gaze.
 
-It receives live dashboard gaze packets on UDP `127.0.0.1:4457`. Once the stock
+It receives live service gaze packets on UDP `127.0.0.1:4457`. Once the stock
 DLL subscribes to gaze, the middleware emits async `0x0500` gaze events using
-the latest dashboard gaze data.
+the latest service gaze data.
 
 Synthetic presence is still used as an availability signal. Synthetic gaze is
-not the desired runtime mode for testing; live dashboard gaze should be present
+not the desired runtime mode for testing; live service gaze should be present
 and valid.
 
 ### SESP Pipe Emulator
@@ -185,7 +197,7 @@ provider/display status. It handles:
 - Status/session metadata and feature updates.
 - Live head pose events.
 
-It receives dashboard pose packets on UDP `127.0.0.1:4243` and converts them
+It receives service pose packets on UDP `127.0.0.1:4243` and converts them
 into the SESP stream expected by the stock DLL.
 
 ### Discovery Pipes
@@ -271,7 +283,7 @@ A good status run should show:
 - Stock-DLL live gaze events are valid.
 
 If runtime/subscriptions are green but live pose or live gaze UDP is zero, the
-stock DLL path is working and the issue is the dashboard producer path.
+stock DLL path is working and the issue is the tracking-engine producer path.
 
 ## Current Runtime Boundaries
 
@@ -289,14 +301,18 @@ testing path is stock DLL plus middleware/SESP emulation.
 
 - `tools/app/tobii-ttp-mux.c`
   Native USB/TTP gaze, eye-origin, and in-band frame reader.
+- `scripts/runtime/tracking-service.py`
+  Local control API and engine owner.
+- `scripts/runtime/tracking_engine.py`
+  Capture, pose solving, calibration, and output lifecycle.
 - `scripts/runtime/native_head_position.py`
   Native eye-position normalization, rotation compensation, and dropout holds.
 - `scripts/runtime/pose_runtime.py`
   Time-based packet filtering and optional trace recording.
 - `scripts/runtime/eye-pose-dashboard.py`
-  Main dashboard, pose solver, calibration UI, and UDP producer.
+  Optional dashboard client and calibration presentation.
 - `scripts/app/run-sc-tobii-native-runtime.sh`
-  Runtime supervisor for stock-DLL services and dashboard.
+  Background supervisor for the tracking engine and stock-DLL compatibility processes.
 - `scripts/app/tobii-middleware-spy.py`
   TCP middleware emulator and live gaze stream provider.
 - `tools/app/tobii-middleware-pipe-spy.c`

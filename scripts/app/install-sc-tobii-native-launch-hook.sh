@@ -30,6 +30,10 @@ cp -f "$launch_script" "$backup"
 tmp="$(mktemp)"
 awk -v root="$root_dir" \
     -v hook_log="$hook_log" \
+    -v hook_log_q="$(sc_shell_quote "$hook_log")" \
+    -v hook_dir_q="$(sc_shell_quote "$log_dir")" \
+    -v service_command="$(sc_shell_quote "$root_dir/scripts/app/manage-tracking-service.py")" \
+    -v ready_command="$(sc_shell_quote "$root_dir/scripts/app/wait-sc-tobii-runtime-ready.sh")" \
     -v capability_mode="$capability_mode" \
     -v unsolicited_presence="$unsolicited_presence" \
     -v tobii_begin="$tobii_begin" \
@@ -47,13 +51,10 @@ awk -v root="$root_dir" \
     if (!inserted && $0 ~ /wineserver[[:space:]]+-k/) {
       print ""
       print tobii_begin
-      print "mkdir -p \"$(dirname " hook_log ")\""
-      print "if test -s \"" root "/.tmp/sc-tobii-native-runtime/pids/runtime-services.pid\" && kill -0 \"$(cat \"" root "/.tmp/sc-tobii-native-runtime/pids/runtime-services.pid\")\" >/dev/null 2>&1; then"
-      print "  echo \"native Tobii services already running\" >>\"" hook_log "\""
-      print "else"
-      print "  (cd \"" root "\" && SC_POC_KEEP_EXISTING_CAPTURE=1 SC_TOBII_TTP_CAPABILITY_MODE=\"" capability_mode "\" SC_TOBII_TTP_UNSOLICITED_PRESENCE=\"" unsolicited_presence "\" make sc-tobii-stock-runtime-services >>\"" hook_log "\" 2>&1 &) || true"
-      print "fi"
-      print "SC_TOBII_READY_TIMEOUT=\"${SC_TOBII_READY_TIMEOUT:-15}\" \"" root "/scripts/app/wait-sc-tobii-runtime-ready.sh\" >>\"" hook_log "\" 2>&1 || true"
+      print "mkdir -p " hook_dir_q
+      print "# client-driven background service v1"
+      print service_command " restart >>" hook_log_q " 2>&1 || true"
+      print "SC_TOBII_READY_TIMEOUT=\"${SC_TOBII_READY_TIMEOUT:-15}\" " ready_command " >>" hook_log_q " 2>&1 || true"
       print tobii_end
       inserted = 1
     }

@@ -1234,7 +1234,7 @@ def main() -> int:
                 missing.append("pose UDP 127.0.0.1:4243")
             if tcp["live_gaze_udp"] <= 0:
                 missing.append("gaze UDP 127.0.0.1:4457")
-            print(f"next=keep the stock runtime path; start or fix the dashboard producer for {', '.join(missing)} before in-game validation.")
+            print(f"next=keep the stock runtime path; start or fix the tracking service for {', '.join(missing)} before in-game validation.")
         elif tcp["live_gaze_event_valid"] <= 0:
             print("next=stock DLL is subscribed, but gaze events are stale/invalid; verify dashboard gaze calibration/valid gaze and the 127.0.0.1:4457 sender.")
         else:

@@ -1,4 +1,5 @@
-.PHONY: all runtime runtime-clean services dashboard headless status clear-logs preflight \
+.DEFAULT_GOAL := all
+.PHONY: all package install-service stop runtime runtime-clean services dashboard headless status clear-logs preflight \
 	sc-tobii-stock-runtime sc-tobii-stock-runtime-services \
 	sc-tobii-stock-runtime-dashboard sc-tobii-stock-runtime-headless \
 	sc-tobii-stock-runtime-status sc-tobii-stock-runtime-clear-logs \
@@ -19,6 +20,9 @@ LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
 LIBUSB_LIBS := $(shell pkg-config --libs libusb-1.0 2>/dev/null)
 OPENSSL_CFLAGS := $(shell pkg-config --cflags openssl 2>/dev/null)
 OPENSSL_LIBS := $(shell pkg-config --libs openssl 2>/dev/null)
+
+package:
+	./scripts/app/package-runtime.py $(if $(VERSION),--version "$(VERSION)",)
 
 all: build/tobii-ttp-mux $(SC_TOBII_STOCK_RECON_DIR)/tobii-middleware-pipe-spy.exe
 
@@ -53,6 +57,7 @@ runtime: all mediapipe-venv mediapipe-fetch-model preflight
 sc-tobii-stock-runtime: runtime
 
 runtime-clean: all mediapipe-venv mediapipe-fetch-model preflight
+	./scripts/app/manage-tracking-service.py stop
 	@work_dir="$${SC_TOBII_NATIVE_RUNTIME_DIR:-.tmp/sc-tobii-native-runtime}"; \
 	tuning_file="$${SC_TUNING_FILE:-$$work_dir/sc-tuning.json}"; \
 	window_state_file="$${SC_WINDOW_STATE_FILE:-$$work_dir/sc-window.json}"; \
@@ -86,7 +91,14 @@ dashboard: build/tobii-ttp-mux mediapipe-venv mediapipe-fetch-model
 
 sc-tobii-stock-runtime-dashboard: dashboard
 
+install-service:
+	./scripts/app/manage-tracking-service.py install
+
+stop:
+	./scripts/app/manage-tracking-service.py stop
+
 status:
+	./scripts/app/manage-tracking-service.py status || true
 	./scripts/app/analyze-sc-tobii-runtime-logs.py --dir "$${SC_TOBII_NATIVE_RUNTIME_DIR:-.tmp/sc-tobii-native-runtime}"
 
 sc-tobii-stock-runtime-status: status

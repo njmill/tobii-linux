@@ -7,10 +7,18 @@ sc_load_config
 work_dir="${SC_TOBII_NATIVE_RUNTIME_DIR:-$root_dir/.tmp/sc-tobii-native-runtime}"
 stock_dir="$root_dir/.tmp/sc-tobii-stock-recon"
 mode="${1:-dashboard}"
+case "$mode" in
+  dashboard) exec "$root_dir/scripts/app/manage-tracking-service.py" dashboard ;;
+  headless) exec "$root_dir/scripts/app/manage-tracking-service.py" start ;;
+  services) exec "$root_dir/scripts/app/manage-tracking-service.py" restart ;;
+  service) ;;
+  *) echo "usage: $0 [dashboard|headless|services|service]" >&2; exit 2 ;;
+esac
 middleware_port="${SC_TOBII_MIDDLEWARE_PORT:-4455}"
 middleware_udp_port="${SC_TOBII_MIDDLEWARE_UDP_PORT:-4457}"
 tobii_udp_port="${SC_TOBII_PORT:-4243}"
 trackir_udp_port="${SC_TRACKIR_BRIDGE_PORT:-4242}"
+capture_demand_port="${SC_TOBII_CAPTURE_DEMAND_PORT:-4244}"
 if [[ -z "${STAR_CITIZEN_PREFIX:-}" && -n "${SC_BIN64:-}" ]]; then
   STAR_CITIZEN_PREFIX="$(sc_prefix_from_bin64 "$SC_BIN64" || true)"
 fi
@@ -89,6 +97,11 @@ wine_bin="${wine_bin:-wine}"
 mkdir -p "$work_dir" "$stock_dir"
 pid_dir="$work_dir/pids"
 mkdir -p "$pid_dir"
+# Keep the singleton lock out of Wine/inference children so they cannot retain it.
+if [[ "${SC_TOBII_SERVICE_LOCK_HELD:-0}" != "1" ]]; then
+  exec flock -n -o "$work_dir/service-supervisor.lock" \
+    env SC_TOBII_SERVICE_LOCK_HELD=1 "$0" service
+fi
 
 if [[ "${SC_TOBII_STOCK_DLL_PREFLIGHT:-1}" == "1" ]]; then
   "$root_dir/scripts/app/check-sc-stock-tobii-dll.sh"
@@ -123,7 +136,7 @@ kill_runtime_supervisor_for_pid() {
     [[ -n "$parent" ]] || return 0
     [[ "$parent" == "$$" || "$parent" == "$BASHPID" || "$parent" == "$PPID" ]] && return 0
     cmd="$(ps -o args= -p "$parent" 2>/dev/null || true)"
-    if [[ "$cmd" == *"run-sc-tobii-native-runtime.sh services"* ]]; then
+    if [[ "$cmd" == *"run-sc-tobii-native-runtime.sh service"* ]]; then
       kill "$parent" 2>/dev/null || true
       return 0
     fi
@@ -133,7 +146,7 @@ kill_runtime_supervisor_for_pid() {
 
 kill_runtime_pidfiles() {
   local name
-  for name in dashboard mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
+  for name in dashboard engine mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
     kill_pidfile "$name"
   done
 }
@@ -242,19 +255,10 @@ restart_services_or_exit() {
     trap - EXIT
     cleanup 2>/dev/null || true
     sleep 1
-    exec "$0" services
+    exec "$0" service
   fi
   exit 1
 }
-
-if [[ "$mode" == "services" ]]; then
-  write_pidfile runtime-services "$$"
-  kill_runtime_pidfiles
-  write_pidfile runtime-services "$$"
-  cleanup_tcp_port_listener "$middleware_port"
-  cleanup_udp_port_listener "$tobii_udp_port"
-  sleep 0.2
-fi
 
 : >"$work_dir/middleware-spy.log"
 : >"$work_dir/middleware-spy.stdout"
@@ -267,13 +271,13 @@ fi
 : >"$work_dir/tobiiprp-prefixed-pipe-spy.log"
 : >"$work_dir/tobiiprp-prefixed-pipe-spy.stdout"
 
-if [[ "${SC_POC_KEEP_EXISTING_CAPTURE:-0}" != "1" ]]; then
-  kill_runtime_pidfiles
-  cleanup_tcp_port_listener "$middleware_port"
-  cleanup_udp_port_listener "$tobii_udp_port"
-  sleep 0.3
-fi
+kill_runtime_pidfiles
+cleanup_tcp_port_listener "$middleware_port"
+cleanup_udp_port_listener "$tobii_udp_port"
+sleep 0.3
 
+write_pidfile runtime-services "$$"
+make -C "$root_dir" all
 echo "starting Tobii TCP middleware emulator on 127.0.0.1:$middleware_port"
 middleware_display_args=(
   --display-id "$display_id"
@@ -294,10 +298,11 @@ if [[ -n "${SC_TOBII_DISPLAY_AREA_HEIGHT:-}" ]]; then
   middleware_display_args+=(--display-area-height "$SC_TOBII_DISPLAY_AREA_HEIGHT")
 fi
 "$root_dir/scripts/app/tobii-middleware-spy.py" \
+  --capture-demand-target "127.0.0.1:$capture_demand_port" \
   --host 127.0.0.1 \
   --port "$middleware_port" \
   --udp-port "$middleware_udp_port" \
-  --seconds "${SC_TOBII_RUNTIME_SECONDS:-86400}" \
+  --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}" \
   --log "$work_dir/middleware-spy.log" \
   --device-serial "${SC_TOBII_DEVICE_SERIAL:-IS5FF-100203612152}" \
   --model-name "${SC_TOBII_MODEL_NAME:-IS5_Large_Eyetracker_5}" \
@@ -317,18 +322,19 @@ fi
   >"$work_dir/middleware-spy.stdout" 2>&1 &
 middleware_pid=$!
 write_pidfile middleware "$middleware_pid"
-dashboard_pid=""
+engine_pid=""
 etdefault_pid=""
 tobii_prefixed_pid=""
 tobiiprp_prefixed_pid=""
 pipe_args=(
-  --seconds "${SC_TOBII_RUNTIME_SECONDS:-86400}"
+  --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}"
   --log "$work_dir/middleware-pipe-spy.log"
   --reply-bootstrap
   --sesp-connect-reply 1
   --sesp-auto-reply "${SC_TOBII_SESP_AUTO_REPLY:-3}"
   --sesp-synthetic-headpose "${SC_TOBII_HEADPOSE_HZ:-30}"
   --sesp-headpose-udp "$tobii_udp_port"
+  --capture-demand-port "$capture_demand_port"
   --display-name "$display_name"
   --display-device-id "$display_id"
   --display-width "$display_width"
@@ -360,7 +366,7 @@ if [[ "${SC_TOBII_ETDEFAULTPIPE:-1}" == "1" ]]; then
       WINEPREFIX="$prefix" \
       WINEDEBUG="${SC_TOBII_PIPE_WINEDEBUG:--all}" \
       "$wine_bin" "$stock_dir/tobii-middleware-pipe-spy.exe" \
-        --seconds "${SC_TOBII_RUNTIME_SECONDS:-86400}" \
+        --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}" \
         --log "$work_dir/etdefaultpipe-spy.log" \
         --pipe "\\\\.\\pipe\\ETDefaultPIPE" \
         --etdefaultpipe \
@@ -378,7 +384,7 @@ if [[ "${SC_TOBII_PREFIXED_PIPE:-1}" == "1" ]]; then
       WINEPREFIX="$prefix" \
       WINEDEBUG="${SC_TOBII_PIPE_WINEDEBUG:--all}" \
       "$wine_bin" "$stock_dir/tobii-middleware-pipe-spy.exe" \
-        --seconds "${SC_TOBII_RUNTIME_SECONDS:-86400}" \
+        --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}" \
         --log "$work_dir/tobii-prefixed-pipe-spy.log" \
         --pipe "\\\\.\\pipe\\TOBII-${SC_TOBII_PREFIXED_ENTRY:-127.0.0.1}"
   ) >"$work_dir/tobii-prefixed-pipe-spy.stdout" 2>&1 &
@@ -394,7 +400,7 @@ if [[ "${SC_TOBII_PRP_PREFIXED_PIPE:-1}" == "1" ]]; then
       WINEPREFIX="$prefix" \
       WINEDEBUG="${SC_TOBII_PIPE_WINEDEBUG:--all}" \
       "$wine_bin" "$stock_dir/tobii-middleware-pipe-spy.exe" \
-        --seconds "${SC_TOBII_RUNTIME_SECONDS:-86400}" \
+        --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}" \
         --log "$work_dir/tobiiprp-prefixed-pipe-spy.log" \
         --pipe "\\\\.\\pipe\\TOBIIPRP-${SC_TOBII_PRP_PREFIXED_ENTRY:-IS5FF-100203612152}"
   ) >"$work_dir/tobiiprp-prefixed-pipe-spy.stdout" 2>&1 &
@@ -403,8 +409,9 @@ if [[ "${SC_TOBII_PRP_PREFIXED_PIPE:-1}" == "1" ]]; then
 fi
 
 cleanup() {
-  if [[ -n "$dashboard_pid" ]]; then
-    kill "$dashboard_pid" 2>/dev/null || true
+  if [[ -n "$engine_pid" ]]; then
+    kill "$engine_pid" 2>/dev/null || true
+    wait "$engine_pid" 2>/dev/null || true
   fi
   if [[ -n "$etdefault_pid" ]]; then
     kill "$etdefault_pid" 2>/dev/null || true
@@ -416,8 +423,8 @@ cleanup() {
     kill "$tobiiprp_prefixed_pid" 2>/dev/null || true
   fi
   kill "$middleware_pid" "$pipe_pid" 2>/dev/null || true
-  if [[ -n "$dashboard_pid" ]]; then
-    wait "$dashboard_pid" 2>/dev/null || true
+  if [[ -n "$engine_pid" ]]; then
+    wait "$engine_pid" 2>/dev/null || true
   fi
   wait "$middleware_pid" 2>/dev/null || true
   wait "$pipe_pid" 2>/dev/null || true
@@ -430,19 +437,20 @@ cleanup() {
   if [[ -n "$tobiiprp_prefixed_pid" ]]; then
     wait "$tobiiprp_prefixed_pid" 2>/dev/null || true
   fi
+  rm -f "$pid_dir/dashboard.pid" "$pid_dir/mux.pid"
   rm -f \
-    "$pid_dir/dashboard.pid" \
-    "$pid_dir/mux.pid" \
+    "$pid_dir/engine.pid" \
     "$pid_dir/middleware.pid" \
     "$pid_dir/pipe.pid" \
     "$pid_dir/etdefaultpipe.pid" \
     "$pid_dir/tobii-prefixed-pipe.pid" \
     "$pid_dir/tobiiprp-prefixed-pipe.pid"
-  if [[ "$mode" == "services" ]]; then
+  if [[ "$mode" == "service" ]]; then
     rm -f "$pid_dir/runtime-services.pid"
   fi
 }
 trap cleanup EXIT
+trap 'exit 0' TERM INT
 
 sleep 1
 if ! kill -0 "$middleware_pid" 2>/dev/null; then
@@ -491,6 +499,9 @@ echo "dashboard output defaults to Tobii; TrackIR fallback target is 127.0.0.1:$
 echo
 
 common_args=(
+  --control-socket "${SC_TOBII_CONTROL_SOCKET:-$work_dir/control.sock}"
+  --capture-demand-port "$capture_demand_port"
+  --skip-build
   --head-position-mode "${SC_HEAD_POSITION_MODE:-auto}"
   --native-head-position-profile "${SC_NATIVE_HEAD_POSITION_PROFILE:-$work_dir/native-head-position.json}"
   --head-position-profile "${SC_HEAD_POSITION_PROFILE:-$work_dir/head-position.json}"
@@ -533,9 +544,15 @@ common_args=(
 )
 
 case "$mode" in
-  services)
-    echo "service-only mode: waiting for Star Citizen; stop this process to shut down Tobii emulation"
+  service)
+    "$root_dir/scripts/runtime/tracking-service.py" "${common_args[@]}" >"$work_dir/tracking-engine.stdout" 2>&1 &
+    engine_pid=$!
+    write_pidfile engine "$engine_pid"
+    echo "background service: waiting for tracking clients"
     while true; do
+      if ! kill -0 "$engine_pid" 2>/dev/null; then
+        restart_services_or_exit "tracking engine" "$work_dir/tracking-engine.stdout"
+      fi
       if ! kill -0 "$middleware_pid" 2>/dev/null; then
         restart_services_or_exit "TCP middleware emulator" "$work_dir/middleware-spy.stdout"
       fi
@@ -554,21 +571,5 @@ case "$mode" in
       sleep 2 &
       wait $! || true
     done
-    ;;
-  dashboard)
-    "$root_dir/scripts/runtime/eye-pose-dashboard.py" "${common_args[@]}" &
-    dashboard_pid=$!
-    write_pidfile dashboard "$dashboard_pid"
-    wait "$dashboard_pid"
-    ;;
-  headless)
-    "$root_dir/scripts/runtime/eye-pose-dashboard.py" --headless "${common_args[@]}" &
-    dashboard_pid=$!
-    write_pidfile dashboard "$dashboard_pid"
-    wait "$dashboard_pid"
-    ;;
-  *)
-    echo "usage: $0 [dashboard|headless]" >&2
-    exit 2
     ;;
 esac
