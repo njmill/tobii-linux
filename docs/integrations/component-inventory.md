@@ -244,6 +244,18 @@ Common failure signs:
 
 ## Setup And Diagnostics
 
+### Managed bootstrap
+
+- **Entry point:** `bootstrap.sh`, downloadable and pipe-safe for one-line setup.
+- **Coordinator:** `scripts/app/install-managed.py`, using Python standard library.
+- **Dependencies:** `scripts/app/install-platform.sh` contains apt/dnf/pacman adapters.
+- **Layout:** Managed versions, shared runtime state, private integration backups,
+  `current`/`previous` links, and a `tobii` command for updates and rollback.
+- **Desktop runtime:** `.venv/ui/` supplies pinned PySide6/Tk independently of
+  distro Python bindings. Source checkouts remain supported.
+- **Recovery:** Prepare before stopping capture; restore prior integration and
+  known settings on activation failure. See [installation guide](../../INSTALL.md).
+
 ### `install.sh`
 
 - **Role:** End-user setup path.

@@ -31,9 +31,52 @@ Run `make package` to create a source archive and SHA-256 checksum under
 `.tmp/releases/`. The bundle contains the installer, update helper, uninstaller,
 and installation guide. It builds native helpers on the destination machine.
 
-## Install With Installer
+## One-line install and update
 
-For the normal setup path, run:
+Run as your normal user, without sudo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/njmill/tobii-linux-pub/main/bootstrap.sh | bash
+```
+
+The same command handles first installation and updates. It downloads the source,
+installs missing system dependencies using apt/dnf/pacman, prepares private Python
+and desktop environments, and builds the native helpers. System packages and USB
+permissions request sudo/doas only when needed. No distro package of this project
+is required, and you do not need Git or a development checkout.
+
+It installs under `~/.local/share/tobii-linux` (or `$XDG_DATA_HOME/tobii-linux`).
+Versioned code is separate from persistent calibration and tuning. Updates prepare
+before stopping the old service, retain a previous version, and preserve your
+**Start at boot** preference. The dashboard opens on a first graphical install;
+first-time calibration remains the existing screen/gaze workflow described below.
+
+After installation:
+
+```bash
+~/.local/bin/tobii update     # or rerun the one-line command
+~/.local/bin/tobii rollback   # return to the previous managed version
+~/.local/bin/tobii status
+```
+
+Close the game before updating. Existing source-checkout users should explicitly
+migrate their settings on the first managed installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/njmill/tobii-linux-pub/main/bootstrap.sh | bash -s -- --migrate-from /path/to/tobii-linux-pub
+```
+
+The installer targets x86-64 glibc Linux on Debian/Ubuntu, Fedora, and Arch families.
+Desktop integration uses XDG standards with a systemd or desktop-autostart fallback;
+it does not require KDE. GNOME can use the dashboard without a tray extension.
+Immutable systems need host dependencies provisioned separately; other package
+managers can use `--no-system-packages` after installing the listed dependencies.
+See [installation, updates, migration, and recovery](INSTALL.md) for options and
+current compatibility limits.
+
+## Install from a source checkout
+
+For developer checkouts or an extracted source bundle, run:
 
 ```bash
 ./install.sh
@@ -82,8 +125,8 @@ and the **Start at boot** checkmark. Startup means the service and tray start wh
 you log in to your desktop session. Changing this preference leaves the current
 session running; **Quit tray** closes only the icon. A green eye indicates active
 capture, a gray eye indicates idle, and a red eye indicates the service is unavailable.
-The tray requires a desktop with system-tray support and system Python PySide6
-QtWidgets, which the installer includes. The service can run independently of it.
+The tray requires desktop system-tray support. The installer supplies PySide6
+QtWidgets in a private Python environment. The service can run independently of it.
 
 Then launch Star Citizen normally. In-game, set head tracking source to `Tobii`
 and enable head tracking.
@@ -153,7 +196,7 @@ Install system packages:
 
 ```bash
 sudo apt install build-essential make pkg-config libusb-1.0-0-dev libssl-dev \
-  mingw-w64 wine python3-tk python3-pyside6.qtwidgets python3-venv curl tar ca-certificates usbutils util-linux
+  mingw-w64 wine python3-tk python3-venv curl tar ca-certificates usbutils util-linux
 ```
 
 MediaPipe requires Python 3.11 or 3.12. If your distro Python is newer, use the

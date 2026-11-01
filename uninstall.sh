@@ -4,11 +4,13 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root_dir"
 source "$root_dir/scripts/app/sc-bin64.sh"
+source "$root_dir/scripts/app/install-platform.sh"
 
 app_name="Tobii Dashboard"
 desktop_id="tobii-dashboard.desktop"
-launcher_path="${HOME}/.local/bin/tobii-dashboard"
-desktop_path="${HOME}/.local/share/applications/${desktop_id}"
+launcher_path="${TOBII_BIN_DIR:-${HOME}/.local/bin}/tobii-dashboard"
+desktop_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
+desktop_path="${desktop_dir}/${desktop_id}"
 udev_rule="/etc/udev/rules.d/99-tobii-eyetracker5.rules"
 runtime_config="$(sc_config_file)"
 
@@ -76,35 +78,6 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
-detect_package_manager() {
-  if need_cmd apt-get; then
-    echo apt
-  elif need_cmd dnf; then
-    echo dnf
-  elif need_cmd pacman; then
-    echo pacman
-  else
-    echo none
-  fi
-}
-
-system_packages_for_pm() {
-  case "$1" in
-    apt)
-      echo build-essential make pkg-config libusb-1.0-0-dev libssl-dev mingw-w64 wine python3-tk python3-pyside6.qtwidgets python3-venv curl tar ca-certificates
-      ;;
-    dnf)
-      echo gcc gcc-c++ make pkgconf-pkg-config libusb1-devel openssl-devel mingw64-gcc wine python3-tkinter python3-pyside6 python3-virtualenv curl tar ca-certificates systemd-udev
-      ;;
-    pacman)
-      echo base-devel pkgconf libusb openssl mingw-w64-gcc wine python tk pyside6 curl tar ca-certificates
-      ;;
-    *)
-      echo
-      ;;
-  esac
-}
-
 rm_path() {
   local path="$1"
   if [[ -e "$path" || -L "$path" ]]; then
@@ -120,7 +93,7 @@ sudo_rm_path() {
   if [[ -e "$path" || -L "$path" ]]; then
     echo "remove $path"
     if [[ "$dry_run" -eq 0 ]]; then
-      $sudo_cmd rm -f "$path"
+      run_privileged rm -f "$path"
     fi
   fi
 }
@@ -139,13 +112,13 @@ remove_packages_for_pm() {
 
   case "$pm" in
     apt)
-      $sudo_cmd apt-get remove -y $packages
+      run_privileged apt-get remove -y $packages
       ;;
     dnf)
-      $sudo_cmd dnf remove -y $packages
+      run_privileged dnf remove -y $packages
       ;;
     pacman)
-      $sudo_cmd pacman -Rs --noconfirm $packages
+      run_privileged pacman -Rs --noconfirm $packages
       ;;
   esac
 }
@@ -155,8 +128,8 @@ reload_udev() {
     return 0
   fi
   if need_cmd udevadm; then
-    $sudo_cmd udevadm control --reload-rules || true
-    $sudo_cmd udevadm trigger || true
+    run_privileged udevadm control --reload-rules || true
+    run_privileged udevadm trigger || true
   else
     warn "udevadm not found; reboot or reload udev manually if the rule was installed."
   fi
@@ -190,7 +163,7 @@ print_plan() {
   echo
   echo "Planned removals:"
   echo "  - user tracking service/autostart entry"
-  echo "  - desktop entries: $desktop_path and ${HOME}/.local/share/applications/tobii-tray.desktop"
+  echo "  - desktop entries: $desktop_path and ${desktop_dir}/tobii-tray.desktop"
   echo "  - launcher: $launcher_path"
   echo "  - build outputs: build/, .tmp/sc-tobii-stock-recon/"
   echo "  - MediaPipe venv: .venv/mediapipe/"
@@ -231,16 +204,17 @@ stop_runtime_helpers
 
 log "Removing application launcher"
 rm_path "$desktop_path"
-rm_path "${HOME}/.local/share/applications/tobii-tray.desktop"
+rm_path "${desktop_dir}/tobii-tray.desktop"
 rm_path "$launcher_path"
 if need_cmd update-desktop-database; then
-  update-desktop-database "${HOME}/.local/share/applications" >/dev/null 2>&1 || true
+  update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true
 fi
 
 log "Removing generated project artifacts"
 rm_path "$root_dir/build"
 rm_path "$root_dir/.tmp/sc-tobii-stock-recon"
 rm_path "$root_dir/.venv/mediapipe"
+rm_path "$root_dir/.venv/ui"
 rm_path "$root_dir/.tmp/uv"
 rm_path "$root_dir/.tmp/uv-python"
 if [[ "$keep_user_data" -eq 0 ]]; then
@@ -271,3 +245,29 @@ The source tree itself was not removed:
   $root_dir
 
 EOF
+
+# Retain cached source versions, but clear managed registration so reinstall works.
+if [[ -f "$root_dir/.managed-install.json" ]]; then
+  python3 - "$root_dir" "$keep_user_data" <<'PYMANAGED'
+import json
+from pathlib import Path
+import shutil
+import sys
+root=Path(sys.argv[1]).resolve()
+marker=json.loads((root/'.managed-install.json').read_text())
+base=Path(marker['base']).resolve()
+if root.parent != base/'versions':
+    raise SystemExit('Managed installation marker does not match its version directory')
+if sys.argv[2]=='0':
+    shutil.rmtree(base/'state/runtime',ignore_errors=True)
+receipt=base/'install.json'
+if receipt.exists():
+    command=Path(json.loads(receipt.read_text())['bin_dir'])/'tobii'
+    command.unlink(missing_ok=True)
+receipt.unlink(missing_ok=True)
+for name in ('current','previous'):
+    path=base/name
+    if path.is_symlink():path.unlink()
+print('Managed integration removed. Cached versions remain in',base/'versions')
+PYMANAGED
+fi

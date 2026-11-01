@@ -4,12 +4,14 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root_dir"
 source "$root_dir/scripts/app/sc-bin64.sh"
+source "$root_dir/scripts/app/install-platform.sh"
+sc_load_config
 
 app_name="Tobii Dashboard"
 desktop_id="tobii-dashboard.desktop"
-launcher_dir="${HOME}/.local/bin"
+launcher_dir="${TOBII_BIN_DIR:-${HOME}/.local/bin}"
 launcher_path="${launcher_dir}/tobii-dashboard"
-desktop_dir="${HOME}/.local/share/applications"
+desktop_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
 desktop_path="${desktop_dir}/${desktop_id}"
 
 install_system_packages=1
@@ -19,6 +21,8 @@ run_build=1
 run_sc_check=1
 install_service=1
 dry_run=0
+prepare_only=0
+activate_only=0
 
 usage() {
   cat <<EOF
@@ -35,6 +39,8 @@ Options:
   --no-build             Do not run MediaPipe/model/build setup.
   --no-sc-check          Do not check the Star Citizen stock Tobii DLL.
   --no-launch-hook       Accepted for compatibility; launch hooks are no longer used.
+  --prepare-only         Install dependencies/build without changing the running app.
+  --activate-only        Register a previously prepared version (no dependency/build work).
   --preflight            Dry-run only: print what would be done and exit.
   -h, --help             Show this help.
 
@@ -68,6 +74,8 @@ while [[ $# -gt 0 ]]; do
     --no-build) run_build=0 ;;
     --no-sc-check) run_sc_check=0 ;;
     --no-launch-hook) ;;
+    --prepare-only) prepare_only=1 ;;
+    --activate-only) activate_only=1; install_system_packages=0; run_build=0 ;;
     --preflight) dry_run=1 ;;
     -h|--help)
       usage
@@ -79,6 +87,10 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$prepare_only" -eq 1 && "$activate_only" -eq 1 ]]; then
+  die "--prepare-only and --activate-only are mutually exclusive"
+fi
 
 sudo_cmd="${SUDO:-sudo}"
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -93,52 +105,28 @@ need_pkg_config() {
   pkg-config --exists "$1" >/dev/null 2>&1
 }
 
-detect_package_manager() {
-  if need_cmd apt-get; then
-    echo apt
-  elif need_cmd dnf; then
-    echo dnf
-  elif need_cmd pacman; then
-    echo pacman
-  else
-    echo none
-  fi
-}
-
-system_packages_for_pm() {
-  case "$1" in
-    apt)
-      echo build-essential make pkg-config libusb-1.0-0-dev libssl-dev mingw-w64 wine python3-tk python3-pyside6.qtwidgets python3-venv curl tar ca-certificates usbutils util-linux
-      ;;
-    dnf)
-      echo gcc gcc-c++ make pkgconf-pkg-config libusb1-devel openssl-devel mingw64-gcc wine python3-tkinter python3-pyside6 python3-virtualenv curl tar ca-certificates systemd-udev usbutils util-linux
-      ;;
-    pacman)
-      echo base-devel pkgconf libusb openssl mingw-w64-gcc wine python tk pyside6 curl tar ca-certificates usbutils util-linux
-      ;;
-    *)
-      echo
-      ;;
-  esac
-}
-
 install_system_deps() {
   local pm="$1"
   local packages
   packages="$(system_packages_for_pm "$pm")"
   [[ -n "$packages" ]] || die "unsupported package manager. Install dependencies from README.md, then rerun with --no-system-packages."
 
-  log "Installing/checking system packages with $pm"
+  local missing=()
+  mapfile -t missing < <(missing_system_packages "$pm")
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    log "System dependencies already installed"
+    return
+  fi
+  log "Installing missing system packages with $pm: ${missing[*]}"
   case "$pm" in
     apt)
-      $sudo_cmd apt-get update
-      $sudo_cmd apt-get install -y $packages
+      run_privileged apt-get update
+      run_privileged apt-get install -y "${missing[@]}"
       ;;
-    dnf)
-      $sudo_cmd dnf install -y $packages
-      ;;
+    dnf) run_privileged dnf install -y "${missing[@]}" ;;
     pacman)
-      $sudo_cmd pacman -Syu --needed --noconfirm $packages
+      # Do not silently upgrade the whole OS or refresh only part of Arch's DB.
+      run_privileged pacman -S --needed --noconfirm "${missing[@]}"
       ;;
   esac
 }
@@ -186,10 +174,14 @@ check_build_deps() {
 
 setup_udev_rule() {
   log "Installing Tobii udev rule"
-  $sudo_cmd install -m 0644 configs/udev/99-tobii-eyetracker5.rules /etc/udev/rules.d/99-tobii-eyetracker5.rules
+  if cmp -s configs/udev/99-tobii-eyetracker5.rules /etc/udev/rules.d/99-tobii-eyetracker5.rules; then
+    echo "USB permission rule already current"
+    return
+  fi
+  run_privileged install -m 0644 configs/udev/99-tobii-eyetracker5.rules /etc/udev/rules.d/99-tobii-eyetracker5.rules
   if need_cmd udevadm; then
-    $sudo_cmd udevadm control --reload-rules || true
-    $sudo_cmd udevadm trigger || true
+    run_privileged udevadm control --reload-rules || true
+    run_privileged udevadm trigger || true
   else
     warn "udevadm not found; reboot or reload udev rules manually."
   fi
@@ -210,6 +202,9 @@ setup_runtime() {
   log "Creating MediaPipe virtualenv"
   make mediapipe-venv
 
+  log "Setting up the desktop Python environment"
+  make ui-venv
+
   log "Fetching MediaPipe face model"
   make mediapipe-fetch-model
 
@@ -221,49 +216,24 @@ write_desktop_launcher() {
   log "Creating desktop/menu launcher"
   mkdir -p "$launcher_dir" "$desktop_dir"
 
-cat >"$launcher_path" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-root="$root_dir"
-log_dir="\${XDG_STATE_HOME:-\$HOME/.local/state}/tobii-linux"
-mkdir -p "\$log_dir"
-log="\$log_dir/dashboard.log"
-config="\${XDG_CONFIG_HOME:-\$HOME/.config}/tobii-linux/runtime.env"
-if [[ -f "\$config" ]]; then
-  # shellcheck disable=SC1090
-  source "\$config"
-fi
-cd "\$root"
-{
-  echo
-  echo "---- \$(date -Is) starting Tobii Dashboard from \$root ----"
-} >>"\$log"
-exec env SC_TOBII_STOCK_DLL_PREFLIGHT=0 ./scripts/app/run-sc-tobii-native-runtime.sh dashboard >>"\$log" 2>&1
-EOF
-  chmod 0755 "$launcher_path"
-
-  cat >"$desktop_path" <<EOF
-[Desktop Entry]
-Type=Application
-Name=$app_name
-Comment=Start the Tobii Linux dashboard and Star Citizen compatibility runtime
-Exec=$launcher_path
-Path=$root_dir
-Terminal=false
-Categories=Utility;Game;
-StartupNotify=true
-Icon=input-gaming
-EOF
-
-  python3 - "$root_dir" "$desktop_dir" <<'PYTRAY'
+  python3 - "$root_dir" "$launcher_path" "$desktop_dir" <<'PYDESKTOP'
 import importlib.util
 from pathlib import Path
+import shlex
 import sys
-root=Path(sys.argv[1])
+root=Path(sys.argv[1]); launcher=Path(sys.argv[2]); desktop=Path(sys.argv[3])
 spec=importlib.util.spec_from_file_location('service_manager',root/'scripts/app/manage-tracking-service.py')
 manager=importlib.util.module_from_spec(spec);spec.loader.exec_module(manager)
-(Path(sys.argv[2])/'tobii-tray.desktop').write_text(manager.tray_desktop_content())
-PYTRAY
+launcher.write_text('#!/bin/sh\nexec '+shlex.quote(manager.gui_python())+' '+
+    shlex.quote(str(root/'scripts/app/manage-tracking-service.py'))+' dashboard "$@"\n')
+launcher.chmod(0o755)
+(desktop/'tobii-dashboard.desktop').write_text(
+    '[Desktop Entry]\nType=Application\nName=Tobii Dashboard\n'
+    'Comment=Head tracking status and calibration\n'
+    f'Exec={manager.desktop_quote(launcher)}\nTerminal=false\n'
+    'Categories=Utility;Game;\nStartupNotify=true\nIcon=input-gaming\n')
+(desktop/'tobii-tray.desktop').write_text(manager.tray_desktop_content())
+PYDESKTOP
 
   if need_cmd update-desktop-database; then
     update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true
@@ -284,7 +254,7 @@ persist_sc_detection() {
     return 0
   fi
   local prefix=""
-  prefix="$(sc_prefix_from_bin64 "$bin64" || true)"
+  prefix="${STAR_CITIZEN_PREFIX:-$(sc_prefix_from_bin64 "$bin64" || true)}"
   local config_file=""
   config_file="$(sc_write_runtime_config "$bin64" "$prefix" "${STAR_CITIZEN_WINE:-}")"
   echo "runtime_config=$config_file"
@@ -334,13 +304,19 @@ print_preflight_report() {
   echo
 
   echo "Planned actions:"
+  if [[ "$prepare_only" -eq 1 ]]; then
+    echo "  - preparation only: no service, desktop, game, or USB configuration changes"
+  fi
+  if [[ "$activate_only" -eq 1 ]]; then
+    echo "  - activation only: no dependency installation or builds"
+  fi
   [[ "$install_system_packages" -eq 1 ]] && echo "  - install missing system packages" || echo "  - skip system packages"
-  [[ "$install_udev" -eq 1 ]] && echo "  - install Tobii udev rule" || echo "  - skip Tobii udev rule"
+  [[ "$install_udev" -eq 1 && "$prepare_only" -eq 0 ]] && echo "  - install Tobii udev rule" || echo "  - skip Tobii udev rule"
   [[ "$run_build" -eq 1 ]] && echo "  - prepare MediaPipe/model and build helpers" || echo "  - skip MediaPipe/model/build setup"
-  [[ "$install_desktop" -eq 1 ]] && echo "  - create application menu entries: $app_name and Tobii Tracking" || echo "  - skip desktop/menu launcher"
-  [[ "$install_service" -eq 1 ]] && echo "  - register tracking service and tray; preserve existing startup preference" || echo "  - skip service autostart registration"
-  [[ "$run_sc_check" -eq 1 ]] && echo "  - check Star Citizen stock Tobii DLL if detected" || echo "  - skip Star Citizen stock DLL check"
-  echo "  - remove any legacy managed launch hook (with backup); use automatic Wine bridges"
+  [[ "$install_desktop" -eq 1 && "$prepare_only" -eq 0 ]] && echo "  - create application menu entries: $app_name and Tobii Tracking" || echo "  - skip desktop/menu launcher"
+  [[ "$install_service" -eq 1 && "$prepare_only" -eq 0 ]] && echo "  - register tracking service and tray; preserve existing startup preference" || echo "  - skip service autostart registration"
+  [[ "$run_sc_check" -eq 1 && "$prepare_only" -eq 0 ]] && echo "  - check Star Citizen stock Tobii DLL if detected" || echo "  - skip Star Citizen stock DLL check"
+  [[ "$prepare_only" -eq 1 ]] || echo "  - remove any legacy managed launch hook (with backup); use automatic Wine bridges"
   echo
 
   if [[ "$install_system_packages" -eq 1 ]]; then
@@ -391,7 +367,7 @@ print_preflight_report() {
       wine_path="$(awk -F= '/^[[:space:]]*export[[:space:]]+wine_path=/{print $2}' "$prefix/sc-launch.sh" | tail -1 | sed -e 's/^"//' -e 's/"$//' || true)"
       [[ -n "$wine_path" ]] && echo "star_citizen_wine=$wine_path/wine"
     fi
-    echo "would_write_runtime_config=$(sc_config_file)"
+    [[ "$prepare_only" -eq 1 ]] || echo "would_write_runtime_config=$(sc_config_file)"
   else
     echo 'manual_override_example=SC_BIN64="/path/with spaces/StarCitizen/LIVE/Bin64" ./install.sh'
   fi
@@ -420,17 +396,27 @@ if ! check_build_deps; then
   die "missing build dependencies remain. Install them and rerun ./install.sh."
 fi
 
-if [[ "$install_udev" -eq 1 ]]; then
+if [[ "$install_udev" -eq 1 && "$prepare_only" -eq 0 ]]; then
   setup_udev_rule
 else
   log "Skipping udev rule install"
 fi
 
 if [[ "$run_build" -eq 1 ]]; then
-  "$root_dir/scripts/app/manage-tracking-service.py" stop
+  if [[ "$prepare_only" -eq 0 ]]; then
+    "$root_dir/scripts/app/manage-tracking-service.py" stop
+  fi
   setup_runtime
 else
   log "Skipping MediaPipe/model/build setup"
+fi
+
+if [[ "$prepare_only" -eq 1 ]]; then
+  echo "Prepared runtime; no service, desktop, game, or USB configuration changed."
+  exit 0
+fi
+if [[ -x "$root_dir/.venv/ui/bin/python" ]]; then
+  export PATH="$root_dir/.venv/ui/bin:$PATH"
 fi
 
 if [[ "$install_desktop" -eq 1 ]]; then
@@ -457,8 +443,15 @@ fi
 log "Removing legacy managed launch hook if present"
 "$root_dir/scripts/app/disable-sc-tobii-native-launch-hook.sh"
 
-log "Setup diagnostics"
-make diag || true
+if [[ "$activate_only" -eq 0 ]]; then
+  log "Setup diagnostics"
+  make diag || true
+fi
+
+if [[ "$activate_only" -eq 1 ]]; then
+  echo "Desktop and service registration complete; managed installer will check startup."
+  exit 0
+fi
 
 cat <<EOF
 

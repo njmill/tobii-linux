@@ -93,7 +93,8 @@ See [Wine bridges](wine-bridges.md) for timing, diagnostics, and current limits.
 
 ## Desktop tray
 
-`tracking-tray.py` is an optional PySide6/Qt system-tray client. It reads snapshots
+`tracking-tray.py` is an optional PySide6/Qt system-tray client. The installer
+supplies its interpreter and Qt modules under `.venv/ui/`. It reads snapshots
 without requesting previews or capture. The icon shows active, idle, or unavailable
 service status. Its menu opens the dashboard, starts/stops the service, toggles
 **Start at boot**, or quits only the tray. Service commands run asynchronously;
@@ -108,14 +109,15 @@ uses `install --preserve-autostart` to retain that choice across updates; explic
 `make install-service` enables it. On-demand startup does not change the preference.
 Uninstall removes both entries and closes the tray.
 
-The tray uses system Python's PySide6 QtWidgets; MediaPipe's private Python
-environment is unchanged. A desktop tray host is required (KDE supports it).
+Desktop clients prefer `.venv/ui/bin/python`, independently of distro Python/Qt
+bindings. MediaPipe retains its separate pinned worker environment. A desktop tray host is required (KDE supports it).
 Tracking itself has no Qt dependency.
 
 ## Settings and controls
 
-Saved tuning, head-position profiles, gaze calibration, screen calibration, and
-window geometry keep their existing paths under `.tmp/sc-tobii-native-runtime/`.
+Managed installs link `.tmp/sc-tobii-native-runtime/` to persistent state outside
+versioned code. Source checkouts retain the same local paths. Saved tuning,
+head-position profiles, gaze/screen calibration, and window geometry survive updates.
 No migration of personal calibration is needed.
 
 Gain changes are validated and persisted by the service. The dashboard only

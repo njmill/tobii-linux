@@ -21,6 +21,7 @@ AUTOSTART=CONFIG/'autostart/tobii-linux-service.desktop'
 TRAY_AUTOSTART=CONFIG/'autostart/tobii-linux-tray.desktop'
 WORK=Path(os.environ.get('SC_TOBII_NATIVE_RUNTIME_DIR',ROOT/'.tmp/sc-tobii-native-runtime'))
 if not WORK.is_absolute():WORK=ROOT/WORK
+WORK=WORK.resolve()
 
 
 def systemd_available():
@@ -56,9 +57,14 @@ def desktop_quote(value):
     return '"'+value+'"'
 
 
+def gui_python():
+    python=ROOT/'.venv/ui/bin/python'
+    return str(python) if python.exists() else sys.executable
+
+
 def desktop_command(action):
     return ' '.join(desktop_quote(value) for value in
-        (sys.executable,ROOT/'scripts/app/manage-tracking-service.py',action))
+        (gui_python(),ROOT/'scripts/app/manage-tracking-service.py',action))
 
 
 def tray_desktop_content():
@@ -205,7 +211,7 @@ def main():
     elif args.action=='disable-autostart':set_autostart(False)
     elif args.action=='autostart-status':print(json.dumps(autostart_status()))
     elif args.action=='tray':
-        os.execv(sys.executable,[sys.executable,str(ROOT/'scripts/runtime/tracking-tray.py')])
+        os.execv(gui_python(),[gui_python(),str(ROOT/'scripts/runtime/tracking-tray.py')])
     elif args.action=='stop':stop()
     elif args.action=='status':
         state=ping()
@@ -220,7 +226,7 @@ def main():
     else:
         ensure_started(restart=args.action=='restart')
         if args.action=='dashboard':
-            os.execv(sys.executable,[sys.executable,str(ROOT/'scripts/runtime/eye-pose-dashboard.py'),'--socket',str(default_socket())])
+            os.execv(gui_python(),[gui_python(),str(ROOT/'scripts/runtime/eye-pose-dashboard.py'),'--socket',str(default_socket())])
         print('tracking service ready')
     return 0
 

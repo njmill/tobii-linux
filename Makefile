@@ -5,7 +5,7 @@
 	sc-tobii-stock-runtime-status sc-tobii-stock-runtime-clear-logs \
 	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight \
 	sc-tobii-stock-disable-launch-hook \
-	mediapipe-python mediapipe-venv mediapipe-fetch-model \
+	ui-venv mediapipe-python mediapipe-venv mediapipe-fetch-model \
 	remove-launch-hook disable-launch-hook install-udev-rule diag clean
 
 CC ?= cc
@@ -43,6 +43,12 @@ $(MEDIAPIPE_READY): requirements-mediapipe.txt scripts/runtime/setup-mediapipe-v
 	./scripts/runtime/setup-mediapipe-venv.sh
 	touch "$@"
 
+ui-venv: .venv/ui/.ready
+
+.venv/ui/.ready: $(MEDIAPIPE_READY) requirements-ui.txt scripts/runtime/setup-ui-venv.sh
+	bash ./scripts/runtime/setup-ui-venv.sh
+	touch "$@"
+
 mediapipe-fetch-model: $(MEDIAPIPE_MODEL)
 
 $(MEDIAPIPE_MODEL): scripts/runtime/fetch-mediapipe-face-landmarker.sh
@@ -51,7 +57,7 @@ $(MEDIAPIPE_MODEL): scripts/runtime/fetch-mediapipe-face-landmarker.sh
 preflight:
 	./scripts/app/check-sc-stock-tobii-dll.sh
 
-runtime: all mediapipe-venv mediapipe-fetch-model preflight
+runtime: all ui-venv mediapipe-fetch-model preflight
 	./scripts/app/run-sc-tobii-native-runtime.sh dashboard
 
 sc-tobii-stock-runtime: runtime
@@ -86,12 +92,12 @@ services: $(SC_TOBII_STOCK_RECON_DIR)/tobii-middleware-pipe-spy.exe preflight
 
 sc-tobii-stock-runtime-services: services
 
-dashboard: build/tobii-ttp-mux mediapipe-venv mediapipe-fetch-model
+dashboard: build/tobii-ttp-mux ui-venv mediapipe-fetch-model
 	SC_TOBII_STOCK_DLL_PREFLIGHT=0 ./scripts/app/run-sc-tobii-native-runtime.sh dashboard
 
 sc-tobii-stock-runtime-dashboard: dashboard
 
-tray:
+tray: ui-venv
 	./scripts/app/manage-tracking-service.py tray
 
 install-service:

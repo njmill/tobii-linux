@@ -17,6 +17,7 @@ def default_socket():
     root = Path(__file__).resolve().parents[2]
     work = Path(os.environ.get('SC_TOBII_NATIVE_RUNTIME_DIR', root / '.tmp/sc-tobii-native-runtime'))
     if not work.is_absolute():work=root/work
+    work=work.resolve()
     path=Path(os.environ.get('SC_TOBII_CONTROL_SOCKET', work / 'control.sock'))
     return path if path.is_absolute() else root/path
 

@@ -176,6 +176,7 @@ def main():
     if not work.is_absolute():
         work = ROOT / work
     work.mkdir(parents=True, exist_ok=True)
+    work = work.resolve()
     lock = QLockFile(str(work / 'tray.lock'))
     lock.setStaleLockTime(0)
     if not lock.tryLock(0):

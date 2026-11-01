@@ -14,7 +14,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOT_FILES = ('README.md', 'INSTALL.md', 'Makefile', 'install.sh', 'update.sh',
-              'uninstall.sh', 'requirements-mediapipe.txt', '.gitignore')
+              'uninstall.sh', 'bootstrap.sh', 'requirements-ui.txt', 'requirements-mediapipe.txt', '.gitignore')
 PUBLIC_DIRS = ('scripts/app', 'scripts/runtime', 'tools/app', 'configs/udev',
                'configs/systemd', 'docs')
 SUFFIXES = {'.py', '.sh', '.c', '.in', '.rules', '.md', '.puml'}
@@ -23,7 +23,7 @@ REQUIRED = ('scripts/runtime/tracking-service.py', 'scripts/runtime/tracking_eng
     'scripts/runtime/service_protocol.py', 'scripts/runtime/capture_control.py',
     'scripts/runtime/wine_bridges.py', 'scripts/runtime/tracking-tray.py',
     'scripts/runtime/eye-pose-dashboard.py', 'scripts/runtime/mediapipe-face-worker.py',
-    'scripts/app/manage-tracking-service.py', 'configs/systemd/tobii-linux.service.in',
+    'scripts/app/install-managed.py', 'scripts/app/manage-tracking-service.py', 'configs/systemd/tobii-linux.service.in',
     'tools/app/tobii-ttp-mux.c', 'tools/app/tobii-middleware-pipe-spy.c')
 
 

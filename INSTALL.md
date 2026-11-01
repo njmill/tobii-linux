@@ -5,7 +5,148 @@ under Wine. The background service starts capture when the game's Tobii client
 requests it and releases capture when those requests end. The dashboard is
 optional during play.
 
-## Install a release bundle
+## Managed installation (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/njmill/tobii-linux-pub/main/bootstrap.sh | bash
+```
+
+Run in a normal user terminal. Sudo/doas is requested only for missing system
+packages and changed USB permissions. The source is built locally; there is no
+project .deb/.rpm package and no need to clone the repository.
+
+The installer selects the latest release when one exists. A published
+`tobii-linux-VERSION.tar.gz` with a matching `.sha256` is verified, including its
+internal manifest. Releases without that source asset use the tag's resolved Git
+commit. Before the first release, the default is the resolved `main` commit.
+GitHub source snapshots are pinned to a full commit and fetched over HTTPS; they
+have no separately published archive checksum/signature. Computed archive hashes
+are recorded in the installation receipt. Optional `GITHUB_TOKEN` is used only for
+GitHub API calls, for example when an API rate limit is reached.
+
+The bootstrap needs Bash and curl (or wget for a downloaded bootstrap). It can
+install missing Python 3 and CA certificates on supported distro families. Source
+setup supplies a compatible private Python, MediaPipe environment, desktop
+PySide6 environment, model, native builds, USB permission rule, menu entries, and
+service/tray registration. It does not replace the system Python. A first
+installation starts the service idle and opens the tray/dashboard if a graphical
+session is available. Calibration itself is unchanged in this installer milestone.
+
+### Locations and commands
+
+```text
+~/.local/share/tobii-linux/
+  current -> versions/<installed-version>/
+  previous -> versions/<previous-version>/
+  versions/                  isolated source/build/Python environments
+  state/runtime/             calibration, tuning, logs, control socket
+  backups/                   private pre-activation settings/integration backups
+  install.json               installed source/version receipt
+~/.local/bin/tobii           command launcher
+```
+
+`XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` are respected. Use
+`--install-dir PATH` to choose a different managed folder. Each version links its
+runtime-state directory to the shared state folder, so settings survive switching
+versions. Do not delete an active version: its virtual environments and service
+registration refer to its physical path. Older and failed preparation directories
+are retained for diagnosis; automatic cache pruning is not implemented yet.
+
+```bash
+~/.local/bin/tobii                 # open the dashboard
+~/.local/bin/tobii tray
+~/.local/bin/tobii status
+~/.local/bin/tobii update           # same effect as rerunning the one-line installer
+~/.local/bin/tobii rollback
+~/.local/bin/tobii version
+~/.local/bin/tobii uninstall
+```
+
+You can use `tobii` without the full path if `~/.local/bin` is on your PATH.
+The installer reports the full command path and does not modify shell profiles.
+The application-menu entries work immediately regardless of shell PATH.
+
+### Updates, recovery, and migration
+
+Updates download, validate, and prepare a separate version before stopping the
+current service. Active capture causes the installer to ask you to close the game
+or stop capture and rerun. At activation it closes this installation's Tobii
+windows, backs up known tuning/calibration and integration files, changes the
+`current` link, registers the prepared version, and checks service startup when
+resuming a running service or starting a first installation. A stopped service
+remains stopped on update. **Start at boot** is preserved.
+
+If activation fails, the installer restores the prior code link, known settings,
+service/menu files, and startup links, and attempts to resume the old service if
+it was running. Installed OS dependencies and USB-rule changes are not rolled
+back. This is process-level recovery, not a power-loss transaction. Keep manual
+settings backups if changing formats across experimental versions.
+
+`rollback` switches back to the retained previous prepared version while keeping
+current personal settings. Only managed versions are rollback targets; the first
+migration from a developer checkout retains that checkout untouched but does not
+make it a managed rollback target.
+
+For an existing checkout/source installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/njmill/tobii-linux-pub/main/bootstrap.sh | bash -s -- --migrate-from /path/to/checkout
+```
+
+This copies known tuning, window, screen/gaze, and head-position profile JSON
+files into shared state and replaces service/menu registration. It leaves the old
+checkout, captures, and research files intact. Existing custom profile environment
+overrides should be reviewed before migration; arbitrary capture files are not
+copied. Without an explicit migration path, an existing registered source install
+is detected and installation stops rather than silently resetting its settings.
+
+### Installer options
+
+Append options using `| bash -s -- OPTIONS`:
+
+```bash
+# Inspect the plan (temporary bootstrap download only; no persistent changes).
+curl -fsSL https://raw.githubusercontent.com/njmill/tobii-linux-pub/main/bootstrap.sh | bash -s -- --preflight
+
+# Pick a published release or deliberately follow a specific Git reference.
+# Replace TAG/REF with an actual repository tag/branch/commit.
+bash bootstrap.sh --version TAG
+bash bootstrap.sh --ref REF
+
+# Prepare/register without starting processes, or supply dependencies yourself.
+bash bootstrap.sh --no-start
+bash bootstrap.sh --no-system-packages --no-udev
+```
+
+`--force` rebuilds an already current version. `--archive /path/to/source.tar.gz`
+uses a local source bundle with its `.sha256` sidecar or an explicit `--sha256 HEX`.
+Python packages and the face model still require network access unless cached.
+`--rollback` needs no source download. `--repo OWNER/NAME` supports explicit forks;
+`--help` lists all options. Concurrent installers for the same managed folder are
+locked out.
+
+### Compatibility scope
+
+- Runtime: Tobii Eye Tracker 5, **x86-64 Linux with glibc 2.28 or newer**. ARM, musl/Alpine, macOS, and
+  Windows are not supported by this runtime/installer.
+- Automatic system dependencies: apt (Debian/Ubuntu family), dnf (Fedora family),
+  and pacman (Arch family), using the distribution's existing repositories.
+  Repo availability, Wine restrictions, and older distro libraries can still
+  require manual provisioning. An Arch update does not silently perform a full
+  OS upgrade; if package metadata is stale, update the OS normally and rerun.
+- Immutable/OSTree systems: automatic package layering and reboot handling are
+  not implemented. Provision host dependencies first and use
+  `--no-system-packages`; USB permissions must still be addressed on the host.
+- Desktops: XDG application/autostart integration, with systemd user services
+  when available. KDE-specific scripting is not required. GNOME can use the
+  dashboard and service without a tray extension; an icon needs a tray host.
+  Tk uses X11/XWayland; dependency lists include XWayland for Wayland desktops.
+- These are supported installation paths, not a claim of full live hardware
+  validation on every distro/desktop combination. Current automated checks cover
+  installer transactions and desktop fallback behavior; full distro tests remain
+  important before calling any combination verified.
+
+## Source checkout / manually extracted release
 
 Keep the installed folder at a stable location: the service and shortcuts refer
 to it. The example below uses `~/Applications/tobii-linux`. Replace `VERSION`
@@ -29,7 +170,7 @@ MediaPipe model; the source archive does not include them.
 
 The installer supports apt, dnf, and pacman. It sets up build dependencies,
 MediaPipe Python, the model, USB permissions, native helpers, service autostart,
-the dashboard/tray shortcuts, PySide6 QtWidgets for the tray, and automatic Wine
+the dashboard/tray shortcuts, a private PySide6 QtWidgets environment, and automatic Wine
 bridge recovery. It removes any legacy
 managed launch hook with a backup. For a
 manual setup or installer options, see [README](README.md).

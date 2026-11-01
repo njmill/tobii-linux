@@ -2,6 +2,9 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ -x "$root_dir/.venv/ui/bin/python" ]]; then
+  export PATH="$root_dir/.venv/ui/bin:$PATH"
+fi
 source "$root_dir/scripts/app/sc-bin64.sh"
 sc_load_config
 work_dir="${SC_TOBII_NATIVE_RUNTIME_DIR:-$root_dir/.tmp/sc-tobii-native-runtime}"
@@ -95,6 +98,7 @@ fi
 wine_bin="${wine_bin:-wine}"
 
 mkdir -p "$work_dir" "$stock_dir"
+work_dir="$(cd "$work_dir" && pwd -P)"
 pid_dir="$work_dir/pids"
 mkdir -p "$pid_dir"
 # Keep the singleton lock out of Wine/inference children so they cannot retain it.
