@@ -91,13 +91,13 @@ detect_package_manager() {
 system_packages_for_pm() {
   case "$1" in
     apt)
-      echo build-essential make pkg-config libusb-1.0-0-dev libssl-dev mingw-w64 wine python3-tk python3-venv curl tar ca-certificates
+      echo build-essential make pkg-config libusb-1.0-0-dev libssl-dev mingw-w64 wine python3-tk python3-pyside6.qtwidgets python3-venv curl tar ca-certificates
       ;;
     dnf)
-      echo gcc gcc-c++ make pkgconf-pkg-config libusb1-devel openssl-devel mingw64-gcc wine python3-tkinter python3-virtualenv curl tar ca-certificates systemd-udev
+      echo gcc gcc-c++ make pkgconf-pkg-config libusb1-devel openssl-devel mingw64-gcc wine python3-tkinter python3-pyside6 python3-virtualenv curl tar ca-certificates systemd-udev
       ;;
     pacman)
-      echo base-devel pkgconf libusb openssl mingw-w64-gcc wine python tk curl tar ca-certificates
+      echo base-devel pkgconf libusb openssl mingw-w64-gcc wine python tk pyside6 curl tar ca-certificates
       ;;
     *)
       echo
@@ -177,7 +177,7 @@ stop_runtime_helpers() {
   local pid_dir="$root_dir/.tmp/sc-tobii-native-runtime/pids"
   local name
   [[ -d "$pid_dir" ]] || return 0
-  for name in dashboard engine mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
+  for name in dashboard engine mux middleware wine-bridges pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
     kill_pidfile "$pid_dir/$name.pid"
   done
 }
@@ -190,7 +190,7 @@ print_plan() {
   echo
   echo "Planned removals:"
   echo "  - user tracking service/autostart entry"
-  echo "  - desktop entry: $desktop_path"
+  echo "  - desktop entries: $desktop_path and ${HOME}/.local/share/applications/tobii-tray.desktop"
   echo "  - launcher: $launcher_path"
   echo "  - build outputs: build/, .tmp/sc-tobii-stock-recon/"
   echo "  - MediaPipe venv: .venv/mediapipe/"
@@ -220,6 +220,9 @@ if [[ "$dry_run" -eq 1 ]]; then
   exit 0
 fi
 
+log "Removing legacy managed launch hook if present"
+"$root_dir/scripts/app/disable-sc-tobii-native-launch-hook.sh"
+
 log "Stopping and unregistering tracking service"
 "$root_dir/scripts/app/manage-tracking-service.py" uninstall
 
@@ -228,6 +231,7 @@ stop_runtime_helpers
 
 log "Removing application launcher"
 rm_path "$desktop_path"
+rm_path "${HOME}/.local/share/applications/tobii-tray.desktop"
 rm_path "$launcher_path"
 if need_cmd update-desktop-database; then
   update-desktop-database "${HOME}/.local/share/applications" >/dev/null 2>&1 || true

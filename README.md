@@ -8,6 +8,7 @@ This public tree contains the current working runtime path:
 
 - Native Linux USB/TTP reader for Tobii ET5 gaze and in-band IR frames.
 - MediaPipe-based head pose in a background tracking service.
+- Desktop tray with tracking status, dashboard access, and a Start at boot option.
 - Stock Star Citizen Tobii DLL compatibility services.
 - Live head pose and gaze delivery into Star Citizen's native Tobii mode.
 
@@ -45,12 +46,14 @@ The installer handles the setup work for you:
 - Prepares a MediaPipe-compatible Python environment.
 - Downloads the MediaPipe face model.
 - Builds the runtime helpers.
-- Registers a user-session tracking service and creates an application-menu entry named `Tobii Dashboard`.
+- Registers a user-session tracking service and tray autostart, and creates
+  `Tobii Dashboard` and `Tobii Tracking` application-menu entries. Existing startup
+  preferences are preserved on updates.
 - Searches common Star Citizen Wine/Lutris/Bottles/Heroic/Steam locations,
   saves the detected runtime path, and checks that its Tobii DLL is stock when
   possible.
-- Installs the Star Citizen launch hook when a compatible `sc-launch.sh` is
-  detected.
+- Prepares and recovers Wine compatibility pipes automatically. Existing managed
+  Star Citizen launch hooks are removed with a launcher backup.
 - Runs setup diagnostics at the end so you can see what is ready and what still
   needs attention.
 
@@ -63,7 +66,6 @@ Installer options:
 ./install.sh --no-desktop           # skip menu entry creation
 ./install.sh --no-service           # skip login service registration
 ./install.sh --no-sc-check          # skip Star Citizen stock DLL safety check
-./install.sh --no-launch-hook       # skip Star Citizen launch hook install
 ```
 
 After installation, review the diagnostics printed by the installer. Replug the
@@ -73,6 +75,15 @@ open `Tobii Dashboard` from your application menu.
 The service starts idle. The dashboard connects to it for status and tuning.
 When capture first runs with the dashboard open, it guides you through missing
 screen/gaze calibration. Closing the dashboard leaves active game tracking running.
+
+Open **Tobii Tracking** from the application menu, or run `make tray`, to show the
+tray icon. Right-click it for **Open dashboard**, **Start service**, **Stop service**,
+and the **Start at boot** checkmark. Startup means the service and tray start when
+you log in to your desktop session. Changing this preference leaves the current
+session running; **Quit tray** closes only the icon. A green eye indicates active
+capture, a gray eye indicates idle, and a red eye indicates the service is unavailable.
+The tray requires a desktop with system-tray support and system Python PySide6
+QtWidgets, which the installer includes. The service can run independently of it.
 
 Then launch Star Citizen normally. In-game, set head tracking source to `Tobii`
 and enable head tracking.
@@ -142,7 +153,7 @@ Install system packages:
 
 ```bash
 sudo apt install build-essential make pkg-config libusb-1.0-0-dev libssl-dev \
-  mingw-w64 wine python3-tk python3-venv curl tar ca-certificates usbutils util-linux
+  mingw-w64 wine python3-tk python3-pyside6.qtwidgets python3-venv curl tar ca-certificates usbutils util-linux
 ```
 
 MediaPipe requires Python 3.11 or 3.12. If your distro Python is newer, use the
@@ -225,18 +236,20 @@ the game and then run:
 make status
 ```
 
-If the status output says the launch hook is missing or `sc-launch.sh` runs
-`wineserver -k`, run:
+The background service restores Wine compatibility pipes automatically after a
+launcher runs `wineserver -k`. No launch-script hook is needed. When upgrading an
+existing checkout without rerunning the installer, remove the old managed block
+and restart the service once:
 
 ```bash
-make install-launch-hook
+make remove-launch-hook
+make services
 ```
 
-If `make diag` says the launch hook is installed but `make status` reports
-`SC launch hook execution: lines=0`, Star Citizen is probably being launched
-through a different script than the one the installer patched. Launch through
-the patched `sc-launch.sh`, or set `STAR_CITIZEN_LAUNCH_SCRIPT` to the script
-your launcher actually runs and then rerun `make install-launch-hook`.
+Removal backs up the launcher and preserves everything outside the marked Tobii
+block. Check `Wine compatibility bridge` in `make status`, or inspect
+`.tmp/sc-tobii-native-runtime/wine-bridges.stdout` if recovery fails. See
+[Wine bridge discovery and recovery](docs/integrations/wine-bridges.md).
 
 If Star Citizen uses a custom Lutris/Heroic/Proton/Wine runner and the runtime
 does not find it automatically, set:
@@ -256,18 +269,19 @@ SC_BIN64="/path/with spaces/StarCitizen/LIVE/Bin64" ./install.sh
 
 - `make package` builds a redistributable source archive.
 - `make runtime` starts/attaches the optional dashboard and ensures the service is running.
-- `make install-service` registers login autostart.
+- `make install-service` enables service and tray autostart at desktop login.
+- `make tray` opens the tray icon without opening the dashboard.
 - `make headless` starts the service without opening a dashboard.
 - `make stop` stops the service and releases the tracker.
 - `make runtime-clean` clears saved tuning/window/calibration state, then starts the runtime for first-run testing.
 - `make services` restarts the tracking and compatibility service stack.
 - `make dashboard` connects the dashboard to the service.
 - `make status` analyzes runtime logs.
-- `make diag` checks setup, USB permissions, Star Citizen detection, and launch hook state.
+- `make diag` checks setup, USB permissions, Star Citizen detection, and legacy hook migration.
 - `make clear-logs` clears runtime logs.
 - `make preflight` verifies Star Citizen is using the stock Tobii DLL.
-- `make install-launch-hook` installs the helper launch hook.
-- `make disable-launch-hook` removes the helper launch hook.
+- `make remove-launch-hook` removes a legacy managed launch hook without stopping tracking.
+  `make disable-launch-hook` remains an alias.
 
 ## Repository Layout
 

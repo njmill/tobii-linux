@@ -21,6 +21,7 @@ SUFFIXES = {'.py', '.sh', '.c', '.in', '.rules', '.md', '.puml'}
 REQUIRED = ('scripts/runtime/tracking-service.py', 'scripts/runtime/tracking_engine.py',
     'scripts/runtime/tracking_core.py', 'scripts/runtime/runtime_config.py',
     'scripts/runtime/service_protocol.py', 'scripts/runtime/capture_control.py',
+    'scripts/runtime/wine_bridges.py', 'scripts/runtime/tracking-tray.py',
     'scripts/runtime/eye-pose-dashboard.py', 'scripts/runtime/mediapipe-face-worker.py',
     'scripts/app/manage-tracking-service.py', 'configs/systemd/tobii-linux.service.in',
     'tools/app/tobii-ttp-mux.c', 'tools/app/tobii-middleware-pipe-spy.c')

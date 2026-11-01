@@ -66,12 +66,17 @@ static DWORD WINAPI capture_demand_worker(LPVOID unused)
     target.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     target.sin_port = htons((unsigned short)capture_demand_port);
     ULONGLONG epoch = GetTickCount64(), sequence = 0;
+    /* Windows PIDs can repeat across prefixes; the host manager supplies a nonce. */
+    char instance[64];
+    DWORD instance_length = GetEnvironmentVariableA("TOBII_LINUX_BRIDGE_INSTANCE", instance, sizeof(instance));
+    if (!instance_length || instance_length >= sizeof(instance))
+        snprintf(instance, sizeof(instance), "%lu", (unsigned long)sesp_headpose_udp_port);
     LONG previous = -1;
     while (InterlockedCompareExchange(&capture_demand_running, 0, 0)) {
         LONG count = InterlockedCompareExchange(&capture_clients, 0, 0);
         char message[160];
-        int size = snprintf(message, sizeof(message), "tobii-demand-v1 sesp:%lu:%llu %llu %ld",
-            (unsigned long)GetCurrentProcessId(), (unsigned long long)epoch,
+        int size = snprintf(message, sizeof(message), "tobii-demand-v1 sesp:%s:%lu:%llu %llu %ld",
+            instance, (unsigned long)GetCurrentProcessId(), (unsigned long long)epoch,
             (unsigned long long)++sequence, (long)count);
         sendto(sock, message, size, 0, (struct sockaddr *)&target, sizeof(target));
         if (count != previous) {
@@ -1558,7 +1563,7 @@ int main(int argc, char **argv)
 
     ULONGLONG deadline = GetTickCount64() + (ULONGLONG)seconds * 1000ULL;
     log_line(
-        "pipe_listening name=%s seconds=%lu mode=%s reply_bootstrap=%d client_write_len=%lu sesp_connect_reply=%s/0x%lx sesp_auto_reply=%s/%u synthetic_headpose=%s/%lu headpose_udp=%lu provider_nudge=%s suffix_scan=%s etdefault_entry=%s display_override=%s/%lux%lu",
+        "pipe_starting name=%s seconds=%lu mode=%s reply_bootstrap=%d client_write_len=%lu sesp_connect_reply=%s/0x%lx sesp_auto_reply=%s/%u synthetic_headpose=%s/%lu headpose_udp=%lu provider_nudge=%s suffix_scan=%s etdefault_entry=%s display_override=%s/%lux%lu",
         pipe_name,
         (unsigned long)seconds,
         etdefaultpipe_mode ? "etdefaultpipe" : "streamengineservices",
@@ -1598,6 +1603,7 @@ int main(int argc, char **argv)
         }
         log_line("capture_demand_started port=%lu", (unsigned long)capture_demand_port);
     }
+    int announced_listening = 0;
     while (seconds == 0 || GetTickCount64() < deadline) {
         HANDLE pipe = CreateNamedPipeA(
             pipe_name,
@@ -1612,6 +1618,10 @@ int main(int argc, char **argv)
             log_line("CreateNamedPipe failed error=%lu", GetLastError());
             Sleep(500);
             continue;
+        }
+        if (!announced_listening) {
+            log_line("pipe_listening name=%s", pipe_name);
+            announced_listening = 1;
         }
 
         BOOL connected = ConnectNamedPipe(pipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);

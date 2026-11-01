@@ -146,7 +146,7 @@ kill_runtime_supervisor_for_pid() {
 
 kill_runtime_pidfiles() {
   local name
-  for name in dashboard engine mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
+  for name in dashboard engine mux middleware wine-bridges pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
     kill_pidfile "$name"
   done
 }
@@ -323,161 +323,59 @@ fi
 middleware_pid=$!
 write_pidfile middleware "$middleware_pid"
 engine_pid=""
-etdefault_pid=""
-tobii_prefixed_pid=""
-tobiiprp_prefixed_pid=""
+bridge_pid=""
 pipe_args=(
-  --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}"
-  --log "$work_dir/middleware-pipe-spy.log"
   --reply-bootstrap
   --sesp-connect-reply 1
   --sesp-auto-reply "${SC_TOBII_SESP_AUTO_REPLY:-3}"
   --sesp-synthetic-headpose "${SC_TOBII_HEADPOSE_HZ:-30}"
-  --sesp-headpose-udp "$tobii_udp_port"
   --capture-demand-port "$capture_demand_port"
   --display-name "$display_name"
   --display-device-id "$display_id"
   --display-width "$display_width"
   --display-height "$display_height"
 )
-if [[ "${SC_TOBII_SESP_PROVIDER_NUDGE:-0}" == "1" ]]; then
-  pipe_args+=(--sesp-provider-nudge)
-fi
-if [[ "${SC_TOBII_PIPE_SUFFIX_SCAN:-0}" == "1" ]]; then
-  pipe_args+=(--client-pipe-suffix-scan)
-fi
-
-echo "starting Tobii SESP pipe emulator; live headpose UDP 127.0.0.1:$tobii_udp_port"
-(
-  cd "$work_dir"
-  env \
-    WINEPREFIX="$prefix" \
-    WINEDEBUG="${SC_TOBII_PIPE_WINEDEBUG:--all}" \
-    "$wine_bin" "$stock_dir/tobii-middleware-pipe-spy.exe" "${pipe_args[@]}"
-) >"$work_dir/middleware-pipe-spy.stdout" 2>&1 &
-pipe_pid=$!
-write_pidfile pipe "$pipe_pid"
-
-if [[ "${SC_TOBII_ETDEFAULTPIPE:-1}" == "1" ]]; then
-  echo "starting Tobii ETDefaultPIPE discovery emulator; entry=${SC_TOBII_ETDEFAULT_ENTRY:-127.0.0.1}"
-  (
-    cd "$work_dir"
-    env \
-      WINEPREFIX="$prefix" \
-      WINEDEBUG="${SC_TOBII_PIPE_WINEDEBUG:--all}" \
-      "$wine_bin" "$stock_dir/tobii-middleware-pipe-spy.exe" \
-        --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}" \
-        --log "$work_dir/etdefaultpipe-spy.log" \
-        --pipe "\\\\.\\pipe\\ETDefaultPIPE" \
-        --etdefaultpipe \
-        --etdefault-entry "${SC_TOBII_ETDEFAULT_ENTRY:-127.0.0.1}"
-  ) >"$work_dir/etdefaultpipe-spy.stdout" 2>&1 &
-  etdefault_pid=$!
-  write_pidfile etdefaultpipe "$etdefault_pid"
-fi
-
-if [[ "${SC_TOBII_PREFIXED_PIPE:-1}" == "1" ]]; then
-  echo "starting Tobii TOBII-* discovery marker pipe; name=TOBII-${SC_TOBII_PREFIXED_ENTRY:-127.0.0.1}"
-  (
-    cd "$work_dir"
-    env \
-      WINEPREFIX="$prefix" \
-      WINEDEBUG="${SC_TOBII_PIPE_WINEDEBUG:--all}" \
-      "$wine_bin" "$stock_dir/tobii-middleware-pipe-spy.exe" \
-        --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}" \
-        --log "$work_dir/tobii-prefixed-pipe-spy.log" \
-        --pipe "\\\\.\\pipe\\TOBII-${SC_TOBII_PREFIXED_ENTRY:-127.0.0.1}"
-  ) >"$work_dir/tobii-prefixed-pipe-spy.stdout" 2>&1 &
-  tobii_prefixed_pid=$!
-  write_pidfile tobii-prefixed-pipe "$tobii_prefixed_pid"
-fi
-
-if [[ "${SC_TOBII_PRP_PREFIXED_PIPE:-1}" == "1" ]]; then
-  echo "starting Tobii TOBIIPRP-* discovery marker pipe; name=TOBIIPRP-${SC_TOBII_PRP_PREFIXED_ENTRY:-IS5FF-100203612152}"
-  (
-    cd "$work_dir"
-    env \
-      WINEPREFIX="$prefix" \
-      WINEDEBUG="${SC_TOBII_PIPE_WINEDEBUG:--all}" \
-      "$wine_bin" "$stock_dir/tobii-middleware-pipe-spy.exe" \
-        --seconds "${SC_TOBII_RUNTIME_SECONDS:-0}" \
-        --log "$work_dir/tobiiprp-prefixed-pipe-spy.log" \
-        --pipe "\\\\.\\pipe\\TOBIIPRP-${SC_TOBII_PRP_PREFIXED_ENTRY:-IS5FF-100203612152}"
-  ) >"$work_dir/tobiiprp-prefixed-pipe-spy.stdout" 2>&1 &
-  tobiiprp_prefixed_pid=$!
-  write_pidfile tobiiprp-prefixed-pipe "$tobiiprp_prefixed_pid"
-fi
+[[ "${SC_TOBII_SESP_PROVIDER_NUDGE:-0}" == "1" ]] && pipe_args+=(--sesp-provider-nudge)
+[[ "${SC_TOBII_PIPE_SUFFIX_SCAN:-0}" == "1" ]] && pipe_args+=(--client-pipe-suffix-scan)
+pipe_args_json="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${pipe_args[@]}")"
+discovery_args_json="$(python3 - <<'PYARGS'
+import json, os
+e = os.environ
+commands = []
+if e.get('SC_TOBII_ETDEFAULTPIPE', '1') == '1':
+    commands.append(['etdefaultpipe-spy', ['--pipe', r'\\.\pipe\ETDefaultPIPE',
+        '--etdefaultpipe', '--etdefault-entry', e.get('SC_TOBII_ETDEFAULT_ENTRY', '127.0.0.1')]])
+if e.get('SC_TOBII_PREFIXED_PIPE', '1') == '1':
+    commands.append(['tobii-prefixed-pipe-spy', ['--pipe', r'\\.\pipe\TOBII-' + e.get('SC_TOBII_PREFIXED_ENTRY', '127.0.0.1')]])
+if e.get('SC_TOBII_PRP_PREFIXED_PIPE', '1') == '1':
+    commands.append(['tobiiprp-prefixed-pipe-spy', ['--pipe', r'\\.\pipe\TOBIIPRP-' + e.get('SC_TOBII_PRP_PREFIXED_ENTRY', 'IS5FF-100203612152')]])
+print(json.dumps(commands))
+PYARGS
+)"
+bridge_options=()
+[[ "${SC_TOBII_WINE_DISCOVERY:-1}" == "0" ]] && bridge_options+=(--no-discovery)
+python3 "$root_dir/scripts/runtime/wine_bridges.py" "${bridge_options[@]}" \
+  --prefix "$prefix" --wine "$wine_bin" --work-dir "$work_dir" \
+  --executable "$stock_dir/tobii-middleware-pipe-spy.exe" \
+  --pose-port "$tobii_udp_port" --sesp-args "$pipe_args_json" \
+  --discovery-args "$discovery_args_json" >"$work_dir/wine-bridges.stdout" 2>&1 &
+bridge_pid=$!
+write_pidfile wine-bridges "$bridge_pid"
 
 cleanup() {
   if [[ -n "$engine_pid" ]]; then
     kill "$engine_pid" 2>/dev/null || true
     wait "$engine_pid" 2>/dev/null || true
   fi
-  if [[ -n "$etdefault_pid" ]]; then
-    kill "$etdefault_pid" 2>/dev/null || true
-  fi
-  if [[ -n "$tobii_prefixed_pid" ]]; then
-    kill "$tobii_prefixed_pid" 2>/dev/null || true
-  fi
-  if [[ -n "$tobiiprp_prefixed_pid" ]]; then
-    kill "$tobiiprp_prefixed_pid" 2>/dev/null || true
-  fi
-  kill "$middleware_pid" "$pipe_pid" 2>/dev/null || true
-  if [[ -n "$engine_pid" ]]; then
-    wait "$engine_pid" 2>/dev/null || true
-  fi
+  [[ -n "$bridge_pid" ]] && kill "$bridge_pid" 2>/dev/null || true
+  kill "$middleware_pid" 2>/dev/null || true
+  [[ -n "$bridge_pid" ]] && wait "$bridge_pid" 2>/dev/null || true
   wait "$middleware_pid" 2>/dev/null || true
-  wait "$pipe_pid" 2>/dev/null || true
-  if [[ -n "$etdefault_pid" ]]; then
-    wait "$etdefault_pid" 2>/dev/null || true
-  fi
-  if [[ -n "$tobii_prefixed_pid" ]]; then
-    wait "$tobii_prefixed_pid" 2>/dev/null || true
-  fi
-  if [[ -n "$tobiiprp_prefixed_pid" ]]; then
-    wait "$tobiiprp_prefixed_pid" 2>/dev/null || true
-  fi
-  rm -f "$pid_dir/dashboard.pid" "$pid_dir/mux.pid"
-  rm -f \
-    "$pid_dir/engine.pid" \
-    "$pid_dir/middleware.pid" \
-    "$pid_dir/pipe.pid" \
-    "$pid_dir/etdefaultpipe.pid" \
-    "$pid_dir/tobii-prefixed-pipe.pid" \
-    "$pid_dir/tobiiprp-prefixed-pipe.pid"
-  if [[ "$mode" == "service" ]]; then
-    rm -f "$pid_dir/runtime-services.pid"
-  fi
+  rm -f "$pid_dir/dashboard.pid" "$pid_dir/mux.pid" "$pid_dir/engine.pid" \
+    "$pid_dir/middleware.pid" "$pid_dir/wine-bridges.pid" "$pid_dir/runtime-services.pid"
 }
 trap cleanup EXIT
 trap 'exit 0' TERM INT
-
-sleep 1
-if ! kill -0 "$middleware_pid" 2>/dev/null; then
-  echo "error: TCP middleware emulator exited; log follows" >&2
-  sed -n '1,160p' "$work_dir/middleware-spy.stdout" >&2
-  exit 1
-fi
-if ! kill -0 "$pipe_pid" 2>/dev/null; then
-  echo "error: SESP pipe emulator exited; log follows" >&2
-  sed -n '1,160p' "$work_dir/middleware-pipe-spy.stdout" >&2
-  exit 1
-fi
-if [[ -n "$etdefault_pid" ]] && ! kill -0 "$etdefault_pid" 2>/dev/null; then
-  echo "error: ETDefaultPIPE discovery emulator exited; log follows" >&2
-  sed -n '1,160p' "$work_dir/etdefaultpipe-spy.stdout" >&2
-  exit 1
-fi
-if [[ -n "$tobii_prefixed_pid" ]] && ! kill -0 "$tobii_prefixed_pid" 2>/dev/null; then
-  echo "error: TOBII-* discovery marker exited; log follows" >&2
-  sed -n '1,160p' "$work_dir/tobii-prefixed-pipe-spy.stdout" >&2
-  exit 1
-fi
-if [[ -n "$tobiiprp_prefixed_pid" ]] && ! kill -0 "$tobiiprp_prefixed_pid" 2>/dev/null; then
-  echo "error: TOBIIPRP-* discovery marker exited; log follows" >&2
-  sed -n '1,160p' "$work_dir/tobiiprp-prefixed-pipe-spy.stdout" >&2
-  exit 1
-fi
 
 tuning_file="${SC_TUNING_FILE:-$work_dir/sc-tuning.json}"
 window_state_file="${SC_WINDOW_STATE_FILE:-$work_dir/sc-window.json}"
@@ -493,7 +391,7 @@ echo "wine_prefix=$prefix"
 echo "wine_bin=$wine_bin"
 echo "display_binding name=$display_name id=$display_id rect=${display_rect:-$display_x,$display_y,$display_width,$display_height} area_mode=$display_area_mode"
 if [[ -z "${STAR_CITIZEN_WINE:-}" && ! -f "$prefix/sc-launch.sh" ]]; then
-  echo "warning: using wine from PATH; set STAR_CITIZEN_WINE if Star Citizen uses a custom Lutris/Heroic/Proton runner" >&2
+  echo "Wine runner will also be discovered from active Wine/Proton processes"
 fi
 echo "dashboard output defaults to Tobii; TrackIR fallback target is 127.0.0.1:$trackir_udp_port"
 echo
@@ -556,17 +454,8 @@ case "$mode" in
       if ! kill -0 "$middleware_pid" 2>/dev/null; then
         restart_services_or_exit "TCP middleware emulator" "$work_dir/middleware-spy.stdout"
       fi
-      if ! kill -0 "$pipe_pid" 2>/dev/null; then
-        restart_services_or_exit "SESP pipe emulator" "$work_dir/middleware-pipe-spy.stdout"
-      fi
-      if [[ -n "$etdefault_pid" ]] && ! kill -0 "$etdefault_pid" 2>/dev/null; then
-        restart_services_or_exit "ETDefaultPIPE discovery emulator" "$work_dir/etdefaultpipe-spy.stdout"
-      fi
-      if [[ -n "$tobii_prefixed_pid" ]] && ! kill -0 "$tobii_prefixed_pid" 2>/dev/null; then
-        restart_services_or_exit "TOBII-* discovery marker" "$work_dir/tobii-prefixed-pipe-spy.stdout"
-      fi
-      if [[ -n "$tobiiprp_prefixed_pid" ]] && ! kill -0 "$tobiiprp_prefixed_pid" 2>/dev/null; then
-        restart_services_or_exit "TOBIIPRP-* discovery marker" "$work_dir/tobiiprp-prefixed-pipe-spy.stdout"
+      if ! kill -0 "$bridge_pid" 2>/dev/null; then
+        restart_services_or_exit "Wine bridge manager" "$work_dir/wine-bridges.stdout"
       fi
       sleep 2 &
       wait $! || true

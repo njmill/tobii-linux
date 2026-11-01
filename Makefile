@@ -1,12 +1,12 @@
 .DEFAULT_GOAL := all
-.PHONY: all package install-service stop runtime runtime-clean services dashboard headless status clear-logs preflight \
+.PHONY: all package install-service stop runtime runtime-clean services dashboard tray headless status clear-logs preflight \
 	sc-tobii-stock-runtime sc-tobii-stock-runtime-services \
 	sc-tobii-stock-runtime-dashboard sc-tobii-stock-runtime-headless \
 	sc-tobii-stock-runtime-status sc-tobii-stock-runtime-clear-logs \
-	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight sc-tobii-stock-install-launch-hook \
+	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight \
 	sc-tobii-stock-disable-launch-hook \
 	mediapipe-python mediapipe-venv mediapipe-fetch-model \
-	install-launch-hook disable-launch-hook install-udev-rule diag clean
+	remove-launch-hook disable-launch-hook install-udev-rule diag clean
 
 CC ?= cc
 MINGW64_CC ?= x86_64-w64-mingw32-gcc
@@ -91,6 +91,9 @@ dashboard: build/tobii-ttp-mux mediapipe-venv mediapipe-fetch-model
 
 sc-tobii-stock-runtime-dashboard: dashboard
 
+tray:
+	./scripts/app/manage-tracking-service.py tray
+
 install-service:
 	./scripts/app/manage-tracking-service.py install
 
@@ -113,12 +116,7 @@ sc-tobii-stock-runtime-clear-logs: clear-logs
 
 sc-tobii-stock-preflight: preflight
 
-install-launch-hook:
-	./scripts/app/install-sc-tobii-native-launch-hook.sh
-
-sc-tobii-stock-install-launch-hook: install-launch-hook
-
-disable-launch-hook:
+remove-launch-hook disable-launch-hook:
 	./scripts/app/disable-sc-tobii-native-launch-hook.sh
 
 sc-tobii-stock-disable-launch-hook: disable-launch-hook

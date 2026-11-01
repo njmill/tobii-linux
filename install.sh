@@ -17,7 +17,6 @@ install_udev=1
 install_desktop=1
 run_build=1
 run_sc_check=1
-install_launch_hook=1
 install_service=1
 dry_run=0
 
@@ -35,7 +34,7 @@ Options:
   --no-service           Do not register service autostart.
   --no-build             Do not run MediaPipe/model/build setup.
   --no-sc-check          Do not check the Star Citizen stock Tobii DLL.
-  --no-launch-hook       Do not install/update the Star Citizen launch hook.
+  --no-launch-hook       Accepted for compatibility; launch hooks are no longer used.
   --preflight            Dry-run only: print what would be done and exit.
   -h, --help             Show this help.
 
@@ -68,7 +67,7 @@ while [[ $# -gt 0 ]]; do
     --no-service) install_service=0 ;;
     --no-build) run_build=0 ;;
     --no-sc-check) run_sc_check=0 ;;
-    --no-launch-hook) install_launch_hook=0 ;;
+    --no-launch-hook) ;;
     --preflight) dry_run=1 ;;
     -h|--help)
       usage
@@ -109,13 +108,13 @@ detect_package_manager() {
 system_packages_for_pm() {
   case "$1" in
     apt)
-      echo build-essential make pkg-config libusb-1.0-0-dev libssl-dev mingw-w64 wine python3-tk python3-venv curl tar ca-certificates usbutils util-linux
+      echo build-essential make pkg-config libusb-1.0-0-dev libssl-dev mingw-w64 wine python3-tk python3-pyside6.qtwidgets python3-venv curl tar ca-certificates usbutils util-linux
       ;;
     dnf)
-      echo gcc gcc-c++ make pkgconf-pkg-config libusb1-devel openssl-devel mingw64-gcc wine python3-tkinter python3-virtualenv curl tar ca-certificates systemd-udev usbutils util-linux
+      echo gcc gcc-c++ make pkgconf-pkg-config libusb1-devel openssl-devel mingw64-gcc wine python3-tkinter python3-pyside6 python3-virtualenv curl tar ca-certificates systemd-udev usbutils util-linux
       ;;
     pacman)
-      echo base-devel pkgconf libusb openssl mingw-w64-gcc wine python tk curl tar ca-certificates usbutils util-linux
+      echo base-devel pkgconf libusb openssl mingw-w64-gcc wine python tk pyside6 curl tar ca-certificates usbutils util-linux
       ;;
     *)
       echo
@@ -256,6 +255,16 @@ StartupNotify=true
 Icon=input-gaming
 EOF
 
+  python3 - "$root_dir" "$desktop_dir" <<'PYTRAY'
+import importlib.util
+from pathlib import Path
+import sys
+root=Path(sys.argv[1])
+spec=importlib.util.spec_from_file_location('service_manager',root/'scripts/app/manage-tracking-service.py')
+manager=importlib.util.module_from_spec(spec);spec.loader.exec_module(manager)
+(Path(sys.argv[2])/'tobii-tray.desktop').write_text(manager.tray_desktop_content())
+PYTRAY
+
   if need_cmd update-desktop-database; then
     update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true
   fi
@@ -315,90 +324,6 @@ run_stock_dll_check() {
   SC_BIN64="$bin64" make preflight
 }
 
-sc_prefix_for_bin64() {
-  local bin64="$1"
-  local prefix="${STAR_CITIZEN_PREFIX:-}"
-  if [[ -z "$prefix" && -n "$bin64" ]]; then
-    prefix="$(sc_prefix_from_bin64 "$bin64" || true)"
-  fi
-  printf '%s\n' "$prefix"
-}
-
-sc_launch_script_for_bin64() {
-  local bin64="$1"
-  local prefix
-  prefix="$(sc_prefix_for_bin64 "$bin64")"
-  printf '%s\n' "${STAR_CITIZEN_LAUNCH_SCRIPT:-$prefix/sc-launch.sh}"
-}
-
-launch_hook_status() {
-  local launch_script="$1"
-  if [[ -z "$launch_script" || ! -f "$launch_script" ]]; then
-    echo "missing-launch-script"
-  elif grep -q '# tobii-linux-native-tobii-hook begin' "$launch_script"; then
-    echo "installed"
-  elif grep -q 'wineserver[[:space:]]+-k' "$launch_script"; then
-    echo "missing"
-  else
-    echo "no-insertion-point"
-  fi
-}
-
-report_launch_hook() {
-  local bin64="$1"
-  local launch_script=""
-  launch_script="$(sc_launch_script_for_bin64 "$bin64")"
-  local status=""
-  status="$(launch_hook_status "$launch_script")"
-  echo "launch_script=$launch_script"
-  echo "launch_hook=$status"
-  case "$status" in
-    installed)
-      echo "launch_hook_action=already-installed"
-      ;;
-    missing)
-      echo "launch_hook_action=install"
-      ;;
-    missing-launch-script)
-      echo "launch_hook_action=skip-launch-script-not-found"
-      ;;
-    *)
-      echo "launch_hook_action=skip-no-wineserver-k-insertion-point"
-      ;;
-  esac
-}
-
-install_sc_launch_hook() {
-  local bin64="$1"
-  if [[ -z "$bin64" || ! -d "$bin64" ]]; then
-    warn "Star Citizen was not detected; skipping launch hook install."
-    return 0
-  fi
-
-  local launch_script=""
-  launch_script="$(sc_launch_script_for_bin64 "$bin64")"
-  local status=""
-  status="$(launch_hook_status "$launch_script")"
-  case "$status" in
-    installed)
-      log "Updating Star Citizen launch hook for the tracking service"
-      SC_BIN64="$bin64" "$root_dir/scripts/app/install-sc-tobii-native-launch-hook.sh"
-      ;;
-    missing)
-      log "Installing Star Citizen launch hook"
-      SC_BIN64="$bin64" "$root_dir/scripts/app/install-sc-tobii-native-launch-hook.sh"
-      ;;
-    missing-launch-script)
-      warn "Star Citizen launch script was not found: $launch_script"
-      warn "If SC uses a generated launch script later, run: make install-launch-hook"
-      ;;
-    *)
-      warn "Star Citizen launch script has no wineserver -k insertion point: $launch_script"
-      warn "Run make status after launching SC; custom launchers may need manual hook setup."
-      ;;
-  esac
-}
-
 print_preflight_report() {
   local pm="$1"
   local sc_bin64="$2"
@@ -412,10 +337,10 @@ print_preflight_report() {
   [[ "$install_system_packages" -eq 1 ]] && echo "  - install missing system packages" || echo "  - skip system packages"
   [[ "$install_udev" -eq 1 ]] && echo "  - install Tobii udev rule" || echo "  - skip Tobii udev rule"
   [[ "$run_build" -eq 1 ]] && echo "  - prepare MediaPipe/model and build helpers" || echo "  - skip MediaPipe/model/build setup"
-  [[ "$install_desktop" -eq 1 ]] && echo "  - create application menu entry: $app_name" || echo "  - skip desktop/menu launcher"
-  [[ "$install_service" -eq 1 ]] && echo "  - register user-session tracking service" || echo "  - skip service autostart registration"
+  [[ "$install_desktop" -eq 1 ]] && echo "  - create application menu entries: $app_name and Tobii Tracking" || echo "  - skip desktop/menu launcher"
+  [[ "$install_service" -eq 1 ]] && echo "  - register tracking service and tray; preserve existing startup preference" || echo "  - skip service autostart registration"
   [[ "$run_sc_check" -eq 1 ]] && echo "  - check Star Citizen stock Tobii DLL if detected" || echo "  - skip Star Citizen stock DLL check"
-  [[ "$install_launch_hook" -eq 1 ]] && echo "  - install/update Star Citizen launch hook if detected" || echo "  - skip Star Citizen launch hook"
+  echo "  - remove any legacy managed launch hook (with backup); use automatic Wine bridges"
   echo
 
   if [[ "$install_system_packages" -eq 1 ]]; then
@@ -466,7 +391,6 @@ print_preflight_report() {
       wine_path="$(awk -F= '/^[[:space:]]*export[[:space:]]+wine_path=/{print $2}' "$prefix/sc-launch.sh" | tail -1 | sed -e 's/^"//' -e 's/"$//' || true)"
       [[ -n "$wine_path" ]] && echo "star_citizen_wine=$wine_path/wine"
     fi
-    report_launch_hook "$sc_bin64"
     echo "would_write_runtime_config=$(sc_config_file)"
   else
     echo 'manual_override_example=SC_BIN64="/path/with spaces/StarCitizen/LIVE/Bin64" ./install.sh'
@@ -517,7 +441,7 @@ fi
 
 if [[ "$install_service" -eq 1 ]]; then
   log "Registering tracking service"
-  "$root_dir/scripts/app/manage-tracking-service.py" install
+  "$root_dir/scripts/app/manage-tracking-service.py" install --preserve-autostart
 fi
 
 log "Star Citizen detection"
@@ -530,11 +454,8 @@ else
   log "Skipping Star Citizen stock DLL safety check"
 fi
 
-if [[ "$install_launch_hook" -eq 1 ]]; then
-  install_sc_launch_hook "$sc_bin64"
-else
-  log "Skipping Star Citizen launch hook install"
-fi
+log "Removing legacy managed launch hook if present"
+"$root_dir/scripts/app/disable-sc-tobii-native-launch-hook.sh"
 
 log "Setup diagnostics"
 make diag || true

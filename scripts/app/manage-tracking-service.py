@@ -2,6 +2,7 @@
 """Install/start the per-user runtime and launch its optional dashboard client."""
 import argparse
 import fcntl
+import json
 import os
 from pathlib import Path
 import signal
@@ -17,6 +18,7 @@ UNIT='tobii-linux.service'
 CONFIG=Path(os.environ.get('XDG_CONFIG_HOME',Path.home()/'.config'))
 UNIT_PATH=CONFIG/'systemd/user'/UNIT
 AUTOSTART=CONFIG/'autostart/tobii-linux-service.desktop'
+TRAY_AUTOSTART=CONFIG/'autostart/tobii-linux-tray.desktop'
 WORK=Path(os.environ.get('SC_TOBII_NATIVE_RUNTIME_DIR',ROOT/'.tmp/sc-tobii-native-runtime'))
 if not WORK.is_absolute():WORK=ROOT/WORK
 
@@ -49,6 +51,48 @@ def unit_content():
     return template.replace('@ROOT@',str(ROOT).replace('%','%%')).replace('@EXEC@',unit_quote(ROOT/'scripts/app/run-sc-tobii-native-runtime.sh'))
 
 
+def desktop_quote(value):
+    value=str(value).replace('\\','\\\\\\\\').replace('"','\\\\"').replace('`','\\\\`').replace('$','\\\\$').replace('%','%%')
+    return '"'+value+'"'
+
+
+def desktop_command(action):
+    return ' '.join(desktop_quote(value) for value in
+        (sys.executable,ROOT/'scripts/app/manage-tracking-service.py',action))
+
+
+def tray_desktop_content():
+    return ('[Desktop Entry]\nType=Application\nName=Tobii Tracking\n'
+        'Comment=Tracking status, dashboard, and automatic startup\n'
+        f'Exec={desktop_command("tray")}\nTerminal=false\nCategories=Utility;Game;\nIcon=input-gaming\n')
+
+
+def write_autostart(path, name, action, enabled=True):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text('[Desktop Entry]\nType=Application\n'
+        f'Name={name}\nExec={desktop_command(action)}\nTerminal=false\nNoDisplay=true\n'
+        f'Hidden={str(not enabled).lower()}\n')
+
+
+def desktop_enabled(path):
+    if not path.is_file():return False
+    import configparser
+    config=configparser.ConfigParser(interpolation=None)
+    try:
+        config.read(path)
+        return not config.getboolean('Desktop Entry','Hidden',fallback=False) and config.getboolean(
+            'Desktop Entry','X-GNOME-Autostart-enabled',fallback=True)
+    except (ValueError,configparser.Error):return False
+
+
+def autostart_status():
+    if systemd_available():
+        service=systemctl('is-enabled','--quiet',UNIT,check=False).returncode==0
+    else:service=desktop_enabled(AUTOSTART)
+    tray=desktop_enabled(TRAY_AUTOSTART)
+    return dict(enabled=service and tray,service=service,tray=tray)
+
+
 def install(enable=True):
     if systemd_available():
         UNIT_PATH.parent.mkdir(parents=True,exist_ok=True)
@@ -60,13 +104,39 @@ def install(enable=True):
             systemctl('enable',UNIT)
             AUTOSTART.unlink(missing_ok=True)
         print(f'Installed user service: {UNIT_PATH}')
-    else:
-        AUTOSTART.parent.mkdir(parents=True,exist_ok=True)
-        # Desktop-entry quoting differs from shell quoting.
-        executable=str(ROOT/'scripts/app/manage-tracking-service.py').replace('\\','\\\\').replace('"','\\"').replace('%','%%')
-        AUTOSTART.write_text('[Desktop Entry]\nType=Application\nName=Tobii Tracking Service\n'
-            f'Exec="{executable}" start\nTerminal=false\nNoDisplay=true\n')
+    elif enable:
+        write_autostart(AUTOSTART,'Tobii Tracking Service','start')
         print(f'Installed desktop-session autostart: {AUTOSTART}')
+    if enable:
+        write_autostart(TRAY_AUTOSTART,'Tobii Tracking','tray')
+
+
+def set_autostart(enabled):
+    if enabled:
+        install(enable=True)
+    else:
+        if systemd_available() and UNIT_PATH.exists():systemctl('disable',UNIT)
+        if not systemd_available() or AUTOSTART.exists():
+            write_autostart(AUTOSTART,'Tobii Tracking Service','start',enabled=False)
+        # A disabled XDG entry also remembers the choice on non-systemd desktops.
+        write_autostart(TRAY_AUTOSTART,'Tobii Tracking','tray',enabled=False)
+
+
+def install_preserving_autostart():
+    registered=UNIT_PATH.exists() or AUTOSTART.exists() or TRAY_AUTOSTART.exists()
+    enabled=autostart_status()['service'] if registered else True
+    install(enable=enabled)
+    if not enabled:set_autostart(False)
+
+
+def stop_tray():
+    pidfile=WORK/'pids/tray.pid'
+    try:
+        pid=int(pidfile.read_text())
+        command=Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        if os.fsencode(ROOT/'scripts/runtime/tracking-tray.py') in command:
+            os.kill(pid,signal.SIGTERM)
+    except (OSError,ValueError):pass
 
 
 def import_session_environment():
@@ -117,14 +187,25 @@ def ensure_started(restart=False):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('install','uninstall','start','restart','stop','dashboard','status'))
+    parser.add_argument('action',choices=('install','uninstall','start','restart','stop','dashboard','status',
+        'tray','enable-autostart','disable-autostart','autostart-status'))
+    parser.add_argument('--preserve-autostart',action='store_true',
+        help='Keep the existing startup preference when installing/updating')
     args=parser.parse_args()
-    if args.action=='install':install()
+    if args.action=='install':
+        if args.preserve_autostart:install_preserving_autostart()
+        else:install()
     elif args.action=='uninstall':
+        stop_tray()
         stop()
         if systemd_available() and UNIT_PATH.exists():systemctl('disable',UNIT,check=False)
-        UNIT_PATH.unlink(missing_ok=True);AUTOSTART.unlink(missing_ok=True)
+        UNIT_PATH.unlink(missing_ok=True);AUTOSTART.unlink(missing_ok=True);TRAY_AUTOSTART.unlink(missing_ok=True)
         if systemd_available():systemctl('daemon-reload')
+    elif args.action=='enable-autostart':set_autostart(True)
+    elif args.action=='disable-autostart':set_autostart(False)
+    elif args.action=='autostart-status':print(json.dumps(autostart_status()))
+    elif args.action=='tray':
+        os.execv(sys.executable,[sys.executable,str(ROOT/'scripts/runtime/tracking-tray.py')])
     elif args.action=='stop':stop()
     elif args.action=='status':
         state=ping()

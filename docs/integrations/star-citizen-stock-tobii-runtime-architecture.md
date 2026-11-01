@@ -27,13 +27,22 @@ Tobii ET5 USB
   -> tobii-ttp-mux
   -> tracking-service.py + MediaPipe
   -> UDP pose/gaze packets
-      -> Wine SESP pipe emulator for head pose
+      -> wine_bridges.py relay -> Wine SESP pipe emulator per prefix for head pose
       -> TCP middleware emulator for gaze/presence/runtime discovery
   -> stock Star Citizen tobii_gameintegration_x64.dll
   -> Star Citizen native Tobii mode
 ```
 
 ## Components
+
+### Wine bridge lifecycle
+
+`wine_bridges.py` prepares passive pipes in the configured prefix and active host
+Wine/Proton prefixes. It discovers the runner from each process's Wine installation,
+relays pose packets to a dedicated per-prefix UDP port, and restarts providers after
+Wine resets. These restarts preserve the tracking engine and UI connections.
+Only real client subscriptions activate capture. Launch hooks are obsolete;
+see [Wine bridge discovery and recovery](wine-bridges.md).
 
 ### Tobii ET5 Hardware
 

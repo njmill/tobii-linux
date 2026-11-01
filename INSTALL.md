@@ -29,7 +29,9 @@ MediaPipe model; the source archive does not include them.
 
 The installer supports apt, dnf, and pacman. It sets up build dependencies,
 MediaPipe Python, the model, USB permissions, native helpers, service autostart,
-the dashboard shortcut, and the Star Citizen launch hook where detected. For a
+the dashboard/tray shortcuts, PySide6 QtWidgets for the tray, and automatic Wine
+bridge recovery. It removes any legacy
+managed launch hook with a backup. For a
 manual setup or installer options, see [README](README.md).
 
 If Star Citizen is not detected, specify its path, including quotes around spaces:
@@ -41,7 +43,9 @@ SC_BIN64="/path/to/StarCitizen/LIVE/Bin64" ./install.sh
 For a custom runner/prefix, set `STAR_CITIZEN_PREFIX` and `STAR_CITIZEN_WINE` when
 installing. The detected configuration is saved in
 `~/.config/tobii-linux/runtime.env`. Wine compatibility pipes must use the same
-prefix and runner as the game.
+prefix and runner as the game. The configured prefix is prepared in advance;
+active host Wine/Proton prefixes and their runners are also discovered without
+game executable-name matching. See [bridge lifecycle](docs/integrations/wine-bridges.md).
 
 ## First setup and test
 
@@ -59,6 +63,12 @@ prefix and runner as the game.
 You can subsequently launch the game without opening the dashboard. On systemd
 systems the user service is `tobii-linux.service`; otherwise the installer uses a
 normal desktop-session autostart entry.
+
+Open **Tobii Tracking** from your application menu to show the tray. Its right-click
+menu provides dashboard access, service Start/Stop, and **Start at boot**, which
+controls service and tray startup at desktop login. Turning it off leaves the
+current service running. **Quit tray** closes only the icon. The tray is optional;
+capture still follows game subscriptions.
 
 The package includes the tested default gains at 1.00. Personal screen/gaze and
 native head-position profiles are not included. The dashboard provides screen
@@ -86,11 +96,17 @@ sha256sum -c MANIFEST.sha256
 For an existing Git checkout, update the source using your normal Git workflow,
 then run `./update.sh` in that checkout.
 
+The installer preserves your existing **Start at boot** choice on updates.
+
 The helper stops the service, creates a private settings backup under
 `.tmp/backups/runtime-state-*.tar.gz`, and reruns the installer. Saved tuning,
 screen/gaze calibration, and head-position profiles remain in place. It does not
 fetch source code or select a release for you. Installer options can be passed
 through, for example `./update.sh --no-system-packages --no-udev`.
+
+If updating the source without running the installer, run `make remove-launch-hook`
+and `make services` once. The removal helper only removes the marked legacy block,
+creates a launcher backup, and leaves the service running.
 
 Open the dashboard or run `make headless` after updating to start the refreshed
 service. Keep the previous release archive if you want to restore the old source.
@@ -103,10 +119,11 @@ files back to the paths recorded in `backup.json`. Restart the service afterward
 ## Status and troubleshooting
 
 ```bash
-make diag       # setup, USB permissions, prefix and launch-hook checks
+make diag       # setup, USB permissions, prefix and legacy-hook migration checks
 make status     # service state and game integration diagnostics
 make headless   # start the service without a dashboard
 make dashboard  # open the optional dashboard
+make tray       # open the tray and its Start at boot checkmark
 make stop       # stop the service and release the tracker
 ```
 

@@ -10,6 +10,7 @@ component "Tobii ET5 / EyeChip\nphysical USB device\nUSB 2104:0313" as Tobii
 
 node "Linux host" as Linux {
   component "tobii-ttp-mux\nlibusb interface 0" as Mux
+  component "tracking-tray.py\noptional Qt tray client" as Tray
   component "eye-pose-dashboard.py\noptional UI client" as Dashboard
   component "tracking-service.py + TrackingEngine\ncapture, calibration, filtering, output" as Engine
   component "MediaPipe Face Landmarker\nPython 3.11/3.12 venv worker" as MediaPipe
@@ -21,6 +22,7 @@ node "Linux host" as Linux {
 node "Linux compatibility services" as Services {
   component "run-sc-tobii-native-runtime.sh\nservice supervisor" as Supervisor
   component "tobii-middleware-spy.py\nTobii TCP middleware emulator\n127.0.0.1:4455" as TcpMiddleware
+  component "wine_bridges.py\nWine prefix/runner discovery\nindependent provider recovery + UDP relay" as Bridges
   component "tobii-middleware-pipe-spy.exe\nWine SESP pipe emulator\nhead pose provider" as SespPipe
   component "ETDefaultPIPE discovery pipe" as ETDefault
   component "TOBII-* discovery marker pipe" as TobiiPipe
@@ -51,16 +53,20 @@ HeadCal --> Engine : restore on launch
 Engine --> WindowState : save size/position
 WindowState --> Engine : restore on launch
 
-Engine --> SespPipe : UDP double[12]\nhead-pose target 127.0.0.1:4243\nx,y,z,yaw,pitch,roll,source,counter
+Engine --> Bridges : UDP double[12]\nhead-pose target 127.0.0.1:4243\nx,y,z,yaw,pitch,roll,source,counter
 Engine --> TcpMiddleware : UDP double[12]\nlive-gaze target 127.0.0.1:4457\ngaze_x,gaze_y,gaze_valid
+
+Tray --> Engine : private Unix socket\nstatus snapshots only
+Tray ..> Supervisor : service/startup controls via\nmanage-tracking-service.py
 
 Dashboard <--> Engine : private Unix socket\nstatus, tuning, calibration commands
 Supervisor --> Engine : start / monitor / restart
 Supervisor --> TcpMiddleware : start / restart / log
-Supervisor --> SespPipe : start under Wine prefix
-Supervisor --> ETDefault : start under Wine prefix
-Supervisor --> TobiiPipe : start under Wine prefix
-Supervisor --> PrpPipe : start under Wine prefix
+Supervisor --> Bridges : start / monitor
+Bridges --> SespPipe : start / recover per prefix\nrelay head pose to dedicated UDP port
+Bridges --> ETDefault : start / recover per prefix
+Bridges --> TobiiPipe : start / recover per prefix
+Bridges --> PrpPipe : start / recover per prefix
 
 ETDefault --> StockDll : Wine named pipe discovery\n\\\\.\\pipe\\ETDefaultPIPE
 TobiiPipe --> StockDll : Wine named pipe discovery\n\\\\.\\pipe\\TOBII-127.0.0.1
