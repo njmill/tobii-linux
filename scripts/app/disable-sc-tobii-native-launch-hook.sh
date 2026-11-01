@@ -12,42 +12,54 @@ fi
 prefix="${STAR_CITIZEN_PREFIX:-$HOME/Games/star-citizen}"
 launch_script="${STAR_CITIZEN_LAUNCH_SCRIPT:-$prefix/sc-launch.sh}"
 
-if [[ ! -f "$launch_script" ]]; then
-  echo "error: launch script not found: $launch_script" >&2
-  exit 1
-fi
+# Upgrade migration only: remove our marked block, preserving the launcher and service.
+python3 - "$launch_script" <<'PYREMOVE'
+from datetime import datetime
+import os
+from pathlib import Path
+import shutil
+import tempfile
+import sys
 
-backup="$launch_script.bak-disable-tobii-native-$(date +%Y%m%d-%H%M%S)"
-cp -f "$launch_script" "$backup"
-
-tmp="$(mktemp)"
-awk -v begin="$tobii_begin" -v end="$tobii_end" '
-  BEGIN { skip = 0 }
-  $0 == begin { skip = 1; changed = 1; next }
-  $0 == end { skip = 0; next }
-  !skip { print }
-  END {
-    if (!changed) {
-      print "note: native Tobii launch hook was not present" > "/dev/stderr"
-    }
-  }
-' "$launch_script" >"$tmp"
-
-mv "$tmp" "$launch_script"
-chmod +x "$launch_script"
-
-pid_dir="$root_dir/.tmp/sc-tobii-native-runtime/pids"
-if [[ -d "$pid_dir" ]]; then
-  for name in dashboard mux middleware pipe etdefaultpipe tobii-prefixed-pipe tobiiprp-prefixed-pipe runtime-services; do
-    pid_file="$pid_dir/$name.pid"
-    [[ -f "$pid_file" ]] || continue
-    pid="$(cat "$pid_file" 2>/dev/null || true)"
-    rm -f "$pid_file"
-    [[ -n "$pid" ]] || continue
-    kill "$pid" 2>/dev/null || true
-  done
-fi
-
-echo "disabled native Tobii launch hook"
-echo "launch_script=$launch_script"
-echo "backup=$backup"
+path = Path(sys.argv[1]).resolve()
+if not path.is_file():
+    print(f'No legacy launch hook to remove: {path}')
+    raise SystemExit(0)
+original = path.read_bytes()
+lines = original.splitlines(keepends=True)
+begin = b'# tobii-linux-native-tobii-hook begin'
+end = b'# tobii-linux-native-tobii-hook end'
+kept = []
+inside = False
+found = False
+for line in lines:
+    marker = line.strip()
+    if marker == begin:
+        if inside:
+            raise SystemExit('Malformed nested launch hook; launcher left unchanged')
+        inside = found = True
+    elif marker == end:
+        if not inside:
+            raise SystemExit('Unmatched launch hook end; launcher left unchanged')
+        inside = False
+    elif not inside:
+        kept.append(line)
+if inside:
+    raise SystemExit('Unterminated launch hook; launcher left unchanged')
+if not found:
+    print(f'No legacy launch hook present: {path}')
+    raise SystemExit(0)
+backup = path.with_name(path.name + '.bak-remove-tobii-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
+shutil.copy2(path, backup)
+fd, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
+try:
+    with os.fdopen(fd, 'wb') as output:
+        output.write(b''.join(kept))
+        os.fchmod(output.fileno(), path.stat().st_mode & 0o7777)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+print(f'Removed legacy Tobii launch hook: {path}')
+print(f'Backup: {backup}')
+PYREMOVE

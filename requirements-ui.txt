@@ -1,0 +1,2 @@
+# Keep the desktop client independent of distro Python/Qt binding versions.
+PySide6-Essentials==6.8.3

@@ -1,0 +1,18 @@
+[Unit]
+Description=Tobii Linux tracking and compatibility service
+After=graphical-session-pre.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+ExecStart=@EXEC@ service
+Environment=SC_TOBII_STOCK_DLL_PREFLIGHT=0
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=graphical-session.target

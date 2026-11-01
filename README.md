@@ -2,10 +2,13 @@
 
 Linux user-space runtime for Tobii Eye Tracker 5 with Star Citizen support.
 
+For release archives, first setup, upgrades, and removal, see [Installation guide](INSTALL.md).
+
 This public tree contains the current working runtime path:
 
 - Native Linux USB/TTP reader for Tobii ET5 gaze and in-band IR frames.
-- MediaPipe-based head pose in the live dashboard.
+- MediaPipe-based head pose in a background tracking service.
+- Desktop tray with tracking status, dashboard access, and a Start at boot option.
 - Stock Star Citizen Tobii DLL compatibility services.
 - Live head pose and gaze delivery into Star Citizen's native Tobii mode.
 
@@ -16,15 +19,64 @@ This is an early public POC. It is focused on one working path:
 ```text
 Tobii ET5 USB
   -> tobii-ttp-mux
-  -> eye-pose-dashboard.py + MediaPipe
+  -> tracking-service.py + MediaPipe
   -> Tobii middleware compatibility services
   -> stock Star Citizen Tobii DLL
   -> Star Citizen Tobii head tracking and gaze targeting
 ```
 
-## Install With Installer
+## Release Bundle
 
-For the normal setup path, run:
+Run `make package` to create a source archive and SHA-256 checksum under
+`.tmp/releases/`. The bundle contains the installer, update helper, uninstaller,
+and installation guide. It builds native helpers on the destination machine.
+
+## One-line install and update
+
+Run as your normal user, without sudo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/njmill/tobii-linux-pub/main/bootstrap.sh | bash
+```
+
+The same command handles first installation and updates. It downloads the source,
+installs missing system dependencies using apt/dnf/pacman, prepares private Python
+and desktop environments, and builds the native helpers. System packages and USB
+permissions request sudo/doas only when needed. No distro package of this project
+is required, and you do not need Git or a development checkout.
+
+It installs under `~/.local/share/tobii-linux` (or `$XDG_DATA_HOME/tobii-linux`).
+Versioned code is separate from persistent calibration and tuning. Updates prepare
+before stopping the old service, retain a previous version, and preserve your
+**Start at boot** preference. The dashboard opens on a first graphical install;
+first-time calibration remains the existing screen/gaze workflow described below.
+
+After installation:
+
+```bash
+~/.local/bin/tobii update     # or rerun the one-line command
+~/.local/bin/tobii rollback   # return to the previous managed version
+~/.local/bin/tobii status
+```
+
+Close the game before updating. Existing source-checkout users should explicitly
+migrate their settings on the first managed installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/njmill/tobii-linux-pub/main/bootstrap.sh | bash -s -- --migrate-from /path/to/tobii-linux-pub
+```
+
+The installer targets x86-64 glibc Linux on Debian/Ubuntu, Fedora, and Arch families.
+Desktop integration uses XDG standards with a systemd or desktop-autostart fallback;
+it does not require KDE. GNOME can use the dashboard without a tray extension.
+Immutable systems need host dependencies provisioned separately; other package
+managers can use `--no-system-packages` after installing the listed dependencies.
+See [installation, updates, migration, and recovery](INSTALL.md) for options and
+current compatibility limits.
+
+## Install from a source checkout
+
+For developer checkouts or an extracted source bundle, run:
 
 ```bash
 ./install.sh
@@ -37,12 +89,14 @@ The installer handles the setup work for you:
 - Prepares a MediaPipe-compatible Python environment.
 - Downloads the MediaPipe face model.
 - Builds the runtime helpers.
-- Creates an application-menu entry named `Tobii Dashboard`.
+- Registers a user-session tracking service and tray autostart, and creates
+  `Tobii Dashboard` and `Tobii Tracking` application-menu entries. Existing startup
+  preferences are preserved on updates.
 - Searches common Star Citizen Wine/Lutris/Bottles/Heroic/Steam locations,
   saves the detected runtime path, and checks that its Tobii DLL is stock when
   possible.
-- Installs the Star Citizen launch hook when a compatible `sc-launch.sh` is
-  detected.
+- Prepares and recovers Wine compatibility pipes automatically. Existing managed
+  Star Citizen launch hooks are removed with a launcher backup.
 - Runs setup diagnostics at the end so you can see what is ready and what still
   needs attention.
 
@@ -53,16 +107,26 @@ Installer options:
 ./install.sh --no-system-packages   # manage distro packages yourself
 ./install.sh --no-udev              # skip USB permission rule install
 ./install.sh --no-desktop           # skip menu entry creation
+./install.sh --no-service           # skip login service registration
 ./install.sh --no-sc-check          # skip Star Citizen stock DLL safety check
-./install.sh --no-launch-hook       # skip Star Citizen launch hook install
 ```
 
 After installation, review the diagnostics printed by the installer. Replug the
 Tobii device or reboot if device permissions do not update immediately. Then
 open `Tobii Dashboard` from your application menu.
 
-On first launch, the dashboard guides you through screen calibration and gaze
-calibration.
+The service starts idle. The dashboard connects to it for status and tuning.
+When capture first runs with the dashboard open, it guides you through missing
+screen/gaze calibration. Closing the dashboard leaves active game tracking running.
+
+Open **Tobii Tracking** from the application menu, or run `make tray`, to show the
+tray icon. Right-click it for **Open dashboard**, **Start service**, **Stop service**,
+and the **Start at boot** checkmark. Startup means the service and tray start when
+you log in to your desktop session. Changing this preference leaves the current
+session running; **Quit tray** closes only the icon. A green eye indicates active
+capture, a gray eye indicates idle, and a red eye indicates the service is unavailable.
+The tray requires desktop system-tray support. The installer supplies PySide6
+QtWidgets in a private Python environment. The service can run independently of it.
 
 Then launch Star Citizen normally. In-game, set head tracking source to `Tobii`
 and enable head tracking.
@@ -117,6 +181,12 @@ Advanced installer/runtime environment:
 - `SC_TOBII_PIPE_SUFFIX_SCAN=1` enables a diagnostic Wine named-pipe fallback
   used during protocol debugging. It is off by default for normal runtime use.
 
+## Updating
+
+After replacing the source in the same installation folder, run `./update.sh`.
+It backs up personal settings under `.tmp/backups/` and refreshes the installation
+without deleting tuning or calibration. See [upgrade instructions](INSTALL.md#update-an-existing-installation).
+
 ## Manual Install
 
 Use this path if you prefer to manage dependencies yourself or if your distro is
@@ -126,7 +196,7 @@ Install system packages:
 
 ```bash
 sudo apt install build-essential make pkg-config libusb-1.0-0-dev libssl-dev \
-  mingw-w64 wine python3-tk python3-venv curl tar ca-certificates usbutils
+  mingw-w64 wine python3-tk python3-venv curl tar ca-certificates usbutils util-linux
 ```
 
 MediaPipe requires Python 3.11 or 3.12. If your distro Python is newer, use the
@@ -158,13 +228,14 @@ make mediapipe-fetch-model
 make all
 ```
 
-Start the full runtime:
+Register service autostart, then open the optional dashboard:
 
 ```bash
+make install-service
 make runtime
 ```
 
-Or start just the dashboard without the Star Citizen stock-DLL preflight:
+Or attach the dashboard directly; it starts the service if needed:
 
 ```bash
 make dashboard
@@ -208,18 +279,20 @@ the game and then run:
 make status
 ```
 
-If the status output says the launch hook is missing or `sc-launch.sh` runs
-`wineserver -k`, run:
+The background service restores Wine compatibility pipes automatically after a
+launcher runs `wineserver -k`. No launch-script hook is needed. When upgrading an
+existing checkout without rerunning the installer, remove the old managed block
+and restart the service once:
 
 ```bash
-make install-launch-hook
+make remove-launch-hook
+make services
 ```
 
-If `make diag` says the launch hook is installed but `make status` reports
-`SC launch hook execution: lines=0`, Star Citizen is probably being launched
-through a different script than the one the installer patched. Launch through
-the patched `sc-launch.sh`, or set `STAR_CITIZEN_LAUNCH_SCRIPT` to the script
-your launcher actually runs and then rerun `make install-launch-hook`.
+Removal backs up the launcher and preserves everything outside the marked Tobii
+block. Check `Wine compatibility bridge` in `make status`, or inspect
+`.tmp/sc-tobii-native-runtime/wine-bridges.stdout` if recovery fails. See
+[Wine bridge discovery and recovery](docs/integrations/wine-bridges.md).
 
 If Star Citizen uses a custom Lutris/Heroic/Proton/Wine runner and the runtime
 does not find it automatically, set:
@@ -237,16 +310,21 @@ SC_BIN64="/path/with spaces/StarCitizen/LIVE/Bin64" ./install.sh
 
 ## Useful Targets
 
-- `make runtime` starts services plus dashboard.
+- `make package` builds a redistributable source archive.
+- `make runtime` starts/attaches the optional dashboard and ensures the service is running.
+- `make install-service` enables service and tray autostart at desktop login.
+- `make tray` opens the tray icon without opening the dashboard.
+- `make headless` starts the service without opening a dashboard.
+- `make stop` stops the service and releases the tracker.
 - `make runtime-clean` clears saved tuning/window/calibration state, then starts the runtime for first-run testing.
-- `make services` starts only the Wine-visible Tobii compatibility services.
-- `make dashboard` starts only the Linux dashboard/data producer.
+- `make services` restarts the tracking and compatibility service stack.
+- `make dashboard` connects the dashboard to the service.
 - `make status` analyzes runtime logs.
-- `make diag` checks setup, USB permissions, Star Citizen detection, and launch hook state.
+- `make diag` checks setup, USB permissions, Star Citizen detection, and legacy hook migration.
 - `make clear-logs` clears runtime logs.
 - `make preflight` verifies Star Citizen is using the stock Tobii DLL.
-- `make install-launch-hook` installs the helper launch hook.
-- `make disable-launch-hook` removes the helper launch hook.
+- `make remove-launch-hook` removes a legacy managed launch hook without stopping tracking.
+  `make disable-launch-hook` remains an alias.
 
 ## Repository Layout
 
@@ -260,22 +338,37 @@ SC_BIN64="/path/with spaces/StarCitizen/LIVE/Bin64" ./install.sh
 Generated files, personal settings/calibrations, logs, captures, and local research
 are kept outside version control under `.tmp/`, `.venv/`, or `build/`.
 
+## Capture Control
+
+The tracking service starts idle in **Auto** mode. A compatible client's head-pose start
+or gaze/presence subscription starts capture; stop/unsubscribe or disconnection
+releases it. No game executable matching is used. **Start Capture** and **Stop
+Capture** override client control; **Auto** restores it.
+
+See [client-driven capture](docs/integrations/client-driven-capture.md) for the
+first live test, supported protocol messages, and shutdown timing.
+
+See [background service and dashboard](docs/integrations/tracking-service.md) for
+autostart, service controls, settings ownership, and the local API. Closing the
+dashboard does not stop capture requested by a game.
+
 ## Movement Tuning
 
 The default gains use the tested movement baseline. A gain of `1.00` keeps that
 response, `0.50` halves it, and `2.00` doubles it. Zero disables an axis; negative
 gains reverse direction. X translation and pitch/yaw compensation start disabled.
-**Reset Tuning** restores these defaults. Restart the dashboard after updating.
+**Reset Tuning** restores these defaults. Restart the service after backend updates.
 
 Native head-position compensation uses a personal profile at
 `.tmp/sc-tobii-native-runtime/native-head-position.json` when available. It combines
 Tobii eye position with MediaPipe rotation and holds position when a matching
 measurement is unavailable. Personal profiles are not distributed with the repo;
 without one, the runtime uses native eye-origin translation. To compare with
-uncompensated position, launch with `SC_HEAD_POSITION_MODE=eye make runtime`.
+uncompensated position, restart with `SC_HEAD_POSITION_MODE=eye make services`.
 
 ## Developer Documentation
 
+- [Background service and dashboard](docs/integrations/tracking-service.md)
 - [Runtime architecture](docs/integrations/star-citizen-stock-tobii-runtime-architecture.md)
 - [Stock runtime diagram](docs/diagrams/star-citizen-stock-tobii-runtime.puml)
 - [Rendering diagrams](docs/diagrams/README.md)

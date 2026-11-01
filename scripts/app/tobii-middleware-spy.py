@@ -8,6 +8,10 @@ import socket
 import struct
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runtime"))
+from capture_control import DemandPublisher
 
 
 class PeriodicLogWriter:
@@ -458,7 +462,7 @@ def ttp_minimal_response(data: bytes, args) -> bytes:
         )
         return ttp_response(seq, obj, payload)
 
-    if obj in (0x076C, 0x04C4):
+    if obj in (0x076C, 0x04C4, 0x04CE):
         return ttp_response(seq, obj)
 
     if obj in (0x0672, 0x0C62):
@@ -642,6 +646,7 @@ def main() -> int:
     )
     parser.add_argument("--live-gaze-hz", type=float, default=60.0)
     parser.add_argument("--live-gaze-max-age-s", type=float, default=0.5)
+    parser.add_argument("--capture-demand-target", default="", help="Loopback capture-demand UDP target, e.g. 127.0.0.1:4244.")
     args = parser.parse_args()
 
     reply = b""
@@ -671,6 +676,9 @@ def main() -> int:
     udp_server.setblocking(False)
     sel.register(udp_server, selectors.EVENT_READ, ("udp", None))
 
+    demand = DemandPublisher(args.capture_demand_target)
+    next_demand = 0.0
+    last_demand_count = None
     clients = {}
     live_gaze = {
         "seen": 0,
@@ -681,7 +689,7 @@ def main() -> int:
         "counter": 0.0,
         "source": 0.0,
     }
-    deadline = time.monotonic() + args.seconds
+    deadline = math.inf if args.seconds == 0 else time.monotonic() + args.seconds
     log_line(
         args.log,
         f"listening host={args.host} port={args.port} udp_port={args.udp_port} "
@@ -713,6 +721,7 @@ def main() -> int:
                         "rx": 0,
                         "tx": 0,
                         "events": [],
+                        "input_buffer": bytearray(),
                         "stream_subscriptions": set(),
                         "event_seq": 0x1000,
                         "synthetic_frame_counter": 1,
@@ -771,55 +780,78 @@ def main() -> int:
                     clients.pop(cid, None)
                     continue
 
-                client["last"] = time.monotonic()
                 client["rx"] += len(data)
-                log_line(
-                    args.log,
-                    f"recv cid={cid} bytes={len(data)} {ttp_summary(data)} hex={data.hex()} ascii={ascii_preview(data)!r}",
-                )
-                out = reply
-                if args.reply_bootstrap:
-                    out = ttp_minimal_response(data, args) or out
-                if out:
-                    conn.sendall(out)
-                    client["tx"] += len(out)
-                    payload = out[24:] if len(out) >= 24 else b""
-                    tlv = ttp_payload_tlv_summary(payload) if payload else ""
-                    suffix = f" tlv={tlv}" if tlv else ""
-                    log_line(args.log, f"send cid={cid} bytes={len(out)} {ttp_summary(out)}{suffix} hex={out.hex()}")
+                client["input_buffer"].extend(data)
+                while len(client["input_buffer"]) >= 24:
+                    frame_size = 24 + struct.unpack_from(">I", client["input_buffer"], 20)[0]
+                    if frame_size > 1024 * 1024:
+                        # Invalid framing must not manufacture subscriptions.
+                        client["socket"].shutdown(socket.SHUT_RDWR)
+                        client["input_buffer"].clear()
+                        break
+                    if len(client["input_buffer"]) < frame_size:
+                        break
+                    data = bytes(client["input_buffer"][:frame_size])
+                    del client["input_buffer"][:frame_size]
+                    client["last"] = time.monotonic()
+                    log_line(
+                        args.log,
+                        f"recv cid={cid} bytes={len(data)} {ttp_summary(data)} hex={data.hex()} ascii={ascii_preview(data)!r}",
+                    )
+                    out = reply
+                    if args.reply_bootstrap:
+                        out = ttp_minimal_response(data, args) or out
+                    if out:
+                        try:
+                            conn.sendall(out)
+                        except OSError as exc:
+                            log_line(args.log, f"reply_send_error cid={cid} error={exc}")
+                            sel.unregister(conn)
+                            conn.close()
+                            clients.pop(cid, None)
+                            break
+                        client["tx"] += len(out)
+                        payload = out[24:] if len(out) >= 24 else b""
+                        tlv = ttp_payload_tlv_summary(payload) if payload else ""
+                        suffix = f" tlv={tlv}" if tlv else ""
+                        log_line(args.log, f"send cid={cid} bytes={len(out)} {ttp_summary(out)}{suffix} hex={out.hex()}")
 
-                if len(data) >= 24:
-                    opcode, _seq, _kind, obj, _status, payload_len = struct.unpack(">IIIIII", data[:24])
-                    payload = data[24 : 24 + payload_len]
-                    stream_id = parse_subscribe_stream_id(payload) if obj == 0x04C4 else None
-                    if obj == 0x04C4:
-                        log_line(
-                            args.log,
-                            f"subscribe_parse cid={cid} synthetic_presence={int(args.synthetic_presence)} "
-                            f"synthetic_gaze={int(args.synthetic_gaze)} live_gaze={int(args.live_gaze)} "
-                            f"opcode=0x{opcode:04x} payload_len={payload_len} "
-                            f"actual_payload_len={len(payload)} stream={stream_id}",
-                        )
-                        if stream_id is not None:
-                            client["stream_subscriptions"].add(stream_id)
-                            log_line(args.log, f"adoption_phase=tcp_subscribe cid={cid} stream=0x{stream_id:04x}")
-                    if opcode == 0x51 and obj in (0x0672, 0x0C62):
-                        log_line(
-                            args.log,
-                            f"adoption_phase=runtime_metadata cid={cid} obj=0x{obj:04x} mode={args.runtime_metadata_mode}",
-                        )
-                    if args.unsolicited_presence_after_discovery and opcode == 0x51 and obj == 0x06A4:
-                        client["events"].append((time.monotonic() + 0.02, 0x0504))
-                        log_line(args.log, f"schedule_unsolicited_presence cid={cid} stream=0x0504 after=0x06a4")
-                    if args.synthetic_presence and opcode == 0x51 and stream_id == 0x0504:
-                        client["events"].append((time.monotonic() + 0.05, stream_id))
-                        log_line(args.log, f"schedule_stream_event cid={cid} stream=0x{stream_id:04x}")
-                    if args.synthetic_gaze and opcode == 0x51 and stream_id == 0x0500:
-                        client["next_gaze_event"] = time.monotonic() + 0.05
-                        log_line(args.log, f"schedule_gaze_stream cid={cid} stream=0x{stream_id:04x} hz={args.synthetic_gaze_hz:.1f}")
-                    if args.live_gaze and opcode == 0x51 and stream_id == 0x0500:
-                        client["next_gaze_event"] = time.monotonic() + 0.02
-                        log_line(args.log, f"schedule_live_gaze_stream cid={cid} stream=0x{stream_id:04x} hz={args.live_gaze_hz:.1f}")
+                    if len(data) >= 24:
+                        opcode, _seq, _kind, obj, _status, payload_len = struct.unpack(">IIIIII", data[:24])
+                        payload = data[24 : 24 + payload_len]
+                        stream_id = parse_subscribe_stream_id(payload) if obj in (0x04C4, 0x04CE) else None
+                        if obj in (0x04C4, 0x04CE) and opcode == 0x51:
+                            log_line(
+                                args.log,
+                                f"subscribe_parse cid={cid} synthetic_presence={int(args.synthetic_presence)} "
+                                f"synthetic_gaze={int(args.synthetic_gaze)} live_gaze={int(args.live_gaze)} "
+                                f"opcode=0x{opcode:04x} payload_len={payload_len} "
+                                f"actual_payload_len={len(payload)} stream={stream_id}",
+                            )
+                            if stream_id is not None:
+                                if obj == 0x04C4:
+                                    client["stream_subscriptions"].add(stream_id)
+                                else:
+                                    client["stream_subscriptions"].discard(stream_id)
+                                    client["events"] = [(t, stream) for t, stream in client["events"] if stream != stream_id]
+                                log_line(args.log, f"adoption_phase=tcp_{'subscribe' if obj == 0x04C4 else 'unsubscribe'} cid={cid} stream=0x{stream_id:04x}")
+                        if opcode == 0x51 and obj in (0x0672, 0x0C62):
+                            log_line(
+                                args.log,
+                                f"adoption_phase=runtime_metadata cid={cid} obj=0x{obj:04x} mode={args.runtime_metadata_mode}",
+                            )
+                        if args.unsolicited_presence_after_discovery and opcode == 0x51 and obj == 0x06A4:
+                            client["events"].append((time.monotonic() + 0.02, 0x0504))
+                            log_line(args.log, f"schedule_unsolicited_presence cid={cid} stream=0x0504 after=0x06a4")
+                        if args.synthetic_presence and opcode == 0x51 and obj == 0x04C4 and stream_id == 0x0504:
+                            client["events"].append((time.monotonic() + 0.05, stream_id))
+                            log_line(args.log, f"schedule_stream_event cid={cid} stream=0x{stream_id:04x}")
+                        if args.synthetic_gaze and opcode == 0x51 and obj == 0x04C4 and stream_id == 0x0500:
+                            client["next_gaze_event"] = time.monotonic() + 0.05
+                            log_line(args.log, f"schedule_gaze_stream cid={cid} stream=0x{stream_id:04x} hz={args.synthetic_gaze_hz:.1f}")
+                        if args.live_gaze and opcode == 0x51 and obj == 0x04C4 and stream_id == 0x0500:
+                            client["next_gaze_event"] = time.monotonic() + 0.02
+                            log_line(args.log, f"schedule_live_gaze_stream cid={cid} stream=0x{stream_id:04x} hz={args.live_gaze_hz:.1f}")
 
             now = time.monotonic()
             if args.live_gaze:
@@ -921,7 +953,15 @@ def main() -> int:
                         pass
                     conn.close()
                     clients.pop(cid, None)
+            count = sum(bool(c["stream_subscriptions"] & {0x0500, 0x0504}) for c in clients.values())
+            if count != last_demand_count or now >= next_demand:
+                demand.publish(count)
+                if count != last_demand_count:
+                    log_line(args.log, f"capture_demand source=tcp clients={count}")
+                last_demand_count = count
+                next_demand = now + .2
     finally:
+        demand.close()
         for client in list(clients.values()):
             try:
                 sel.unregister(client["socket"])

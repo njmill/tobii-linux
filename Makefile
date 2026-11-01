@@ -1,11 +1,12 @@
-.PHONY: all runtime runtime-clean services dashboard headless status clear-logs preflight \
+.DEFAULT_GOAL := all
+.PHONY: all package install-service stop runtime runtime-clean services dashboard tray headless status clear-logs preflight \
 	sc-tobii-stock-runtime sc-tobii-stock-runtime-services \
 	sc-tobii-stock-runtime-dashboard sc-tobii-stock-runtime-headless \
 	sc-tobii-stock-runtime-status sc-tobii-stock-runtime-clear-logs \
-	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight sc-tobii-stock-install-launch-hook \
+	sc-tobii-stock-runtime-clean sc-tobii-stock-preflight \
 	sc-tobii-stock-disable-launch-hook \
-	mediapipe-python mediapipe-venv mediapipe-fetch-model \
-	install-launch-hook disable-launch-hook install-udev-rule diag clean
+	ui-venv mediapipe-python mediapipe-venv mediapipe-fetch-model \
+	remove-launch-hook disable-launch-hook install-udev-rule diag clean
 
 CC ?= cc
 MINGW64_CC ?= x86_64-w64-mingw32-gcc
@@ -19,6 +20,9 @@ LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
 LIBUSB_LIBS := $(shell pkg-config --libs libusb-1.0 2>/dev/null)
 OPENSSL_CFLAGS := $(shell pkg-config --cflags openssl 2>/dev/null)
 OPENSSL_LIBS := $(shell pkg-config --libs openssl 2>/dev/null)
+
+package:
+	./scripts/app/package-runtime.py $(if $(VERSION),--version "$(VERSION)",)
 
 all: build/tobii-ttp-mux $(SC_TOBII_STOCK_RECON_DIR)/tobii-middleware-pipe-spy.exe
 
@@ -39,6 +43,12 @@ $(MEDIAPIPE_READY): requirements-mediapipe.txt scripts/runtime/setup-mediapipe-v
 	./scripts/runtime/setup-mediapipe-venv.sh
 	touch "$@"
 
+ui-venv: .venv/ui/.ready
+
+.venv/ui/.ready: $(MEDIAPIPE_READY) requirements-ui.txt scripts/runtime/setup-ui-venv.sh
+	bash ./scripts/runtime/setup-ui-venv.sh
+	touch "$@"
+
 mediapipe-fetch-model: $(MEDIAPIPE_MODEL)
 
 $(MEDIAPIPE_MODEL): scripts/runtime/fetch-mediapipe-face-landmarker.sh
@@ -47,12 +57,13 @@ $(MEDIAPIPE_MODEL): scripts/runtime/fetch-mediapipe-face-landmarker.sh
 preflight:
 	./scripts/app/check-sc-stock-tobii-dll.sh
 
-runtime: all mediapipe-venv mediapipe-fetch-model preflight
+runtime: all ui-venv mediapipe-fetch-model preflight
 	./scripts/app/run-sc-tobii-native-runtime.sh dashboard
 
 sc-tobii-stock-runtime: runtime
 
 runtime-clean: all mediapipe-venv mediapipe-fetch-model preflight
+	./scripts/app/manage-tracking-service.py stop
 	@work_dir="$${SC_TOBII_NATIVE_RUNTIME_DIR:-.tmp/sc-tobii-native-runtime}"; \
 	tuning_file="$${SC_TUNING_FILE:-$$work_dir/sc-tuning.json}"; \
 	window_state_file="$${SC_WINDOW_STATE_FILE:-$$work_dir/sc-window.json}"; \
@@ -81,12 +92,22 @@ services: $(SC_TOBII_STOCK_RECON_DIR)/tobii-middleware-pipe-spy.exe preflight
 
 sc-tobii-stock-runtime-services: services
 
-dashboard: build/tobii-ttp-mux mediapipe-venv mediapipe-fetch-model
+dashboard: build/tobii-ttp-mux ui-venv mediapipe-fetch-model
 	SC_TOBII_STOCK_DLL_PREFLIGHT=0 ./scripts/app/run-sc-tobii-native-runtime.sh dashboard
 
 sc-tobii-stock-runtime-dashboard: dashboard
 
+tray: ui-venv
+	./scripts/app/manage-tracking-service.py tray
+
+install-service:
+	./scripts/app/manage-tracking-service.py install
+
+stop:
+	./scripts/app/manage-tracking-service.py stop
+
 status:
+	./scripts/app/manage-tracking-service.py status || true
 	./scripts/app/analyze-sc-tobii-runtime-logs.py --dir "$${SC_TOBII_NATIVE_RUNTIME_DIR:-.tmp/sc-tobii-native-runtime}"
 
 sc-tobii-stock-runtime-status: status
@@ -101,12 +122,7 @@ sc-tobii-stock-runtime-clear-logs: clear-logs
 
 sc-tobii-stock-preflight: preflight
 
-install-launch-hook:
-	./scripts/app/install-sc-tobii-native-launch-hook.sh
-
-sc-tobii-stock-install-launch-hook: install-launch-hook
-
-disable-launch-hook:
+remove-launch-hook disable-launch-hook:
 	./scripts/app/disable-sc-tobii-native-launch-hook.sh
 
 sc-tobii-stock-disable-launch-hook: disable-launch-hook

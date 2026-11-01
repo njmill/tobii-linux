@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import json
+import time
 import os
 import re
 import shlex
@@ -941,13 +943,11 @@ def main() -> int:
     tobii_prefixed_log = runtime_dir / "tobii-prefixed-pipe-spy.log"
     tobiiprp_prefixed_log = runtime_dir / "tobiiprp-prefixed-pipe-spy.log"
     wine_window_probe_log = runtime_dir / "wine-window-probe.log"
-    launch_hook_log = runtime_dir / "launch-hook.log"
     adoption_kick_log = runtime_dir / "adoption-kick.log"
     trackwindow_kick_log = runtime_dir / "trackwindow-kick.log"
     natural_kick_log = runtime_dir / "natural-table-kick.log"
     tcp = parse_tcp(read_lines(tcp_log))
     pipe = parse_pipe(read_lines(pipe_log))
-    launch_hook_lines = read_lines(launch_hook_log)
     etdefault_lines = read_lines(etdefault_log)
     etdefault_listening = sum(1 for line in etdefault_lines if "mode=etdefaultpipe" in line or "ETDefaultPIPE" in line)
     etdefault_requests = sum(1 for line in etdefault_lines if "etdefaultpipe_request" in line)
@@ -981,7 +981,6 @@ def main() -> int:
     print(f"etdefaultpipe_log={etdefault_log} exists={etdefault_log.exists()}")
     print(f"tobii_prefixed_pipe_log={tobii_prefixed_log} exists={tobii_prefixed_log.exists()}")
     print(f"tobiiprp_prefixed_pipe_log={tobiiprp_prefixed_log} exists={tobiiprp_prefixed_log.exists()}")
-    print(f"launch_hook_log={launch_hook_log} exists={launch_hook_log.exists()}")
     print(f"wine_window_probe_log={wine_window_probe_log} exists={wine_window_probe_log.exists()}")
     print()
 
@@ -1202,15 +1201,17 @@ def main() -> int:
     print(status_line(source_value == "3", "SC headtracking source", f"value={source_value or 'missing'} name={source_name} toggle={toggle_value}"))
     print(status_line(sc_context["dll_loaded"], "SC stock Tobii DLL load", "loaded" if sc_context["dll_loaded"] else "not found in launcher/game logs"))
     print(status_line(sc_context["npclient_loaded"], "SC TrackIR DLL load", "loaded" if sc_context["npclient_loaded"] else "not found in launcher/game logs"))
-    hook_detail = (
-        f"native={'yes' if sc_context['native_launch_hook'] else 'no'} "
-        f"api-trace={'yes' if sc_context['api_trace_hook'] else 'no'} "
-        f"wineserver-kill={'yes' if sc_context['launch_kills_wineserver'] else 'no'}"
-    )
-    print(status_line(sc_context["native_launch_hook"], "SC launch hook", hook_detail))
-    hook_latest = launch_hook_lines[-1].strip() if launch_hook_lines else "none"
-    hook_executed = bool(launch_hook_lines)
-    print(status_line(hook_executed, "SC launch hook execution", f"lines={len(launch_hook_lines)} latest={hook_latest[:160]}"))
+    try:
+        bridges = json.loads((runtime_dir / 'wine-bridges.json').read_text())
+        fresh = time.time() - bridges['updated'] < 2
+        for bridge in bridges['prefixes']:
+            print(status_line(fresh and bridge['ready'], "Wine compatibility bridge",
+                f"prefix={bridge['prefix']} runner={bridge['wine']} processes={len(bridge['processes'])}"))
+    except (OSError, ValueError, KeyError, TypeError):
+        print(status_line(False, "Wine compatibility bridges", "no current bridge status; start the service"))
+    print(status_line(not sc_context['native_launch_hook'], "Hook-free launch",
+        "legacy hook present; run make remove-launch-hook" if sc_context['native_launch_hook']
+        else "automatic Wine bridge recovery"))
     trace_counts = sc_context["api_trace"]
     trace_detail = ", ".join(f"{name}={count}" for name, count in trace_counts.items()) or "none"
     print(status_line(bool(trace_counts), "Wine Tobii API trace", trace_detail))
@@ -1234,7 +1235,7 @@ def main() -> int:
                 missing.append("pose UDP 127.0.0.1:4243")
             if tcp["live_gaze_udp"] <= 0:
                 missing.append("gaze UDP 127.0.0.1:4457")
-            print(f"next=keep the stock runtime path; start or fix the dashboard producer for {', '.join(missing)} before in-game validation.")
+            print(f"next=keep the stock runtime path; start or fix the tracking service for {', '.join(missing)} before in-game validation.")
         elif tcp["live_gaze_event_valid"] <= 0:
             print("next=stock DLL is subscribed, but gaze events are stale/invalid; verify dashboard gaze calibration/valid gaze and the 127.0.0.1:4457 sender.")
         else:
@@ -1289,12 +1290,6 @@ def main() -> int:
     elif kick_tcp_sessions and kick_runtime_seen and kick_subscribe_seen and not sc_runtime_seen:
         print("diagnosis=The stock DLL harness adopts successfully and receives live headpose/gaze, but Star Citizen's own stock DLL session still stops before runtime metadata.")
         print("next=the middleware/SESP protocol is good; focus on the in-process API condition that makes SC call TrackTracker, or add a non-game-file runtime trigger that calls TrackTracker inside the SC process.")
-    elif not sc_context["native_launch_hook"] and sc_context["launch_kills_wineserver"]:
-        print("diagnosis=SC launch script is missing the native Tobii hook. sc-launch.sh runs wineserver -k, which kills a manually-started Wine SESP pipe helper before the game starts.")
-        print("next=run make sc-tobii-stock-install-launch-hook, start the dashboard, then launch Star Citizen normally so services restart after wineserver -k.")
-    elif sc_context["native_launch_hook"] and sc_context["launch_kills_wineserver"] and not hook_executed and not pipe_accept:
-        print("diagnosis=The native Tobii hook is installed in the detected sc-launch.sh, but there is no launch-hook log and no SESP pipe attach. Star Citizen was likely launched through a different script/launcher than the one patched by the installer.")
-        print("next=launch Star Citizen through the patched sc-launch.sh, or set STAR_CITIZEN_LAUNCH_SCRIPT to the launcher script that is actually executed and rerun make install-launch-hook.")
     elif provider_nudge_failed and not provider_nudge_ok and not provider_latch_seen:
         print("diagnosis=SESP init/display-info path is reached, but provider nudge writes fail because the callback pipe closes before adoption.")
         print("next=focus on natural provider discovery/adoption so the stock DLL calls TrackTracker or reaches the 0x32/0x1a feature latch.")

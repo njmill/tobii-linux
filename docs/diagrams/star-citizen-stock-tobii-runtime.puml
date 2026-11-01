@@ -10,7 +10,9 @@ component "Tobii ET5 / EyeChip\nphysical USB device\nUSB 2104:0313" as Tobii
 
 node "Linux host" as Linux {
   component "tobii-ttp-mux\nlibusb interface 0" as Mux
-  component "eye-pose-dashboard.py\nruntime UI + calibration + tuning" as Dashboard
+  component "tracking-tray.py\noptional Qt tray client" as Tray
+  component "eye-pose-dashboard.py\noptional UI client" as Dashboard
+  component "tracking-service.py + TrackingEngine\ncapture, calibration, filtering, output" as Engine
   component "MediaPipe Face Landmarker\nPython 3.11/3.12 venv worker" as MediaPipe
   artifact ".tmp/sc-tobii-native-runtime/sc-tuning.json\nquick tuning" as Tuning
   artifact ".tmp/sc-tobii-native-runtime/native-head-position.json\npersonal head-position profile" as HeadCal
@@ -20,6 +22,7 @@ node "Linux host" as Linux {
 node "Linux compatibility services" as Services {
   component "run-sc-tobii-native-runtime.sh\nservice supervisor" as Supervisor
   component "tobii-middleware-spy.py\nTobii TCP middleware emulator\n127.0.0.1:4455" as TcpMiddleware
+  component "wine_bridges.py\nWine prefix/runner discovery\nindependent provider recovery + UDP relay" as Bridges
   component "tobii-middleware-pipe-spy.exe\nWine SESP pipe emulator\nhead pose provider" as SespPipe
   component "ETDefaultPIPE discovery pipe" as ETDefault
   component "TOBII-* discovery marker pipe" as TobiiPipe
@@ -33,27 +36,37 @@ node "Star Citizen Wine prefix" as Wine {
 }
 
 Tobii --> Mux : USB vendor/TTP via libusb\ninterface 0\nEP 0x83 in, EP 0x05 out
-Mux --> Dashboard : gaze + eye-origin stream\n0x0500 / native gaze rows
-Mux --> Dashboard : in-band IR image stream\n0x050e
-Mux --> Dashboard : sync/timing stream\n0x1771
+Mux --> Engine : gaze + eye-origin stream\n0x0500 / native gaze rows
+Mux --> Engine : in-band IR image stream\n0x050e
+Mux --> Engine : sync/timing stream\n0x1771
 
-Dashboard --> MediaPipe : 280x280 IR frames\npreprocess + timestamps
-MediaPipe --> Dashboard : face landmarks\npose + confidence + latency
+TcpMiddleware ..> Engine : subscription demand / disconnect\nUDP loopback 4244
+SespPipe ..> Engine : head-pose start / stop / disconnect\nUDP loopback 4244
+Engine ..> Mux : start / stop capture\nAuto demand or manual controls
 
-Dashboard --> Tuning : save slider changes
-Tuning --> Dashboard : restore on launch
-HeadCal --> Dashboard : restore on launch
-Dashboard --> WindowState : save size/position
-WindowState --> Dashboard : restore on launch
+Engine --> MediaPipe : 280x280 IR frames\npreprocess + timestamps
+MediaPipe --> Engine : face landmarks\npose + confidence + latency
 
-Dashboard --> SespPipe : UDP double[12]\nhead-pose target 127.0.0.1:4243\nx,y,z,yaw,pitch,roll,source,counter
-Dashboard --> TcpMiddleware : UDP double[12]\nlive-gaze target 127.0.0.1:4457\ngaze_x,gaze_y,gaze_valid
+Engine --> Tuning : save slider changes
+Tuning --> Engine : restore on launch
+HeadCal --> Engine : restore on launch
+Engine --> WindowState : save size/position
+WindowState --> Engine : restore on launch
 
+Engine --> Bridges : UDP double[12]\nhead-pose target 127.0.0.1:4243\nx,y,z,yaw,pitch,roll,source,counter
+Engine --> TcpMiddleware : UDP double[12]\nlive-gaze target 127.0.0.1:4457\ngaze_x,gaze_y,gaze_valid
+
+Tray --> Engine : private Unix socket\nstatus snapshots only
+Tray ..> Supervisor : service/startup controls via\nmanage-tracking-service.py
+
+Dashboard <--> Engine : private Unix socket\nstatus, tuning, calibration commands
+Supervisor --> Engine : start / monitor / restart
 Supervisor --> TcpMiddleware : start / restart / log
-Supervisor --> SespPipe : start under Wine prefix
-Supervisor --> ETDefault : start under Wine prefix
-Supervisor --> TobiiPipe : start under Wine prefix
-Supervisor --> PrpPipe : start under Wine prefix
+Supervisor --> Bridges : start / monitor
+Bridges --> SespPipe : start / recover per prefix\nrelay head pose to dedicated UDP port
+Bridges --> ETDefault : start / recover per prefix
+Bridges --> TobiiPipe : start / recover per prefix
+Bridges --> PrpPipe : start / recover per prefix
 
 ETDefault --> StockDll : Wine named pipe discovery\n\\\\.\\pipe\\ETDefaultPIPE
 TobiiPipe --> StockDll : Wine named pipe discovery\n\\\\.\\pipe\\TOBII-127.0.0.1
@@ -61,7 +74,7 @@ PrpPipe --> StockDll : Wine named pipe discovery\n\\\\.\\pipe\\TOBIIPRP-<serial>
 
 StockDll --> TcpMiddleware : TCP TTP / middleware protocol\nhello, discovery, display area,\nruntime metadata, subscriptions
 TcpMiddleware --> StockDll : device metadata + capabilities\npresence stream 0x0504\ngaze stream 0x0500
-TcpMiddleware --> StockDll : async gaze events\nfrom dashboard live gaze UDP
+TcpMiddleware --> StockDll : async gaze events\nfrom service live gaze UDP
 
 StockDll --> SespPipe : SESP provider pipe\ninitialize, display info,\nfeature/status, head-pose channel
 SespPipe --> StockDll : display/provider replies\nlive head pose events
@@ -81,12 +94,17 @@ No Star Citizen Bin64 files are modified.
 No process injection is required.
 end note
 
-note bottom of Dashboard
-Dashboard pose and gaze are independent:
+note bottom of Engine
+Pose and gaze are independent:
 head position uses native eyes + rotation compensation
 when a personal profile is available; missing pairs hold.
 Head pose is smoothed/tuned for cockpit camera,
 gaze remains responsive for target selection.
+end note
+
+note bottom of Dashboard
+Closing the dashboard leaves active tracking running.
+No USB reader or inference worker belongs to the UI.
 end note
 
 @enduml

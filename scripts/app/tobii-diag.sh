@@ -40,19 +40,6 @@ resolve_wine_bin() {
   printf '%s\n' "${wine_bin:-wine}"
 }
 
-hook_state() {
-  local launch_script="$1"
-  if [[ ! -f "$launch_script" ]]; then
-    printf 'missing-launch-script'
-  elif grep -q '# tobii-linux-native-tobii-hook begin' "$launch_script"; then
-    printf 'installed'
-  elif grep -q 'wineserver[[:space:]]+-k' "$launch_script"; then
-    printf 'missing-wineserver-k'
-  else
-    printf 'missing-no-wineserver-k'
-  fi
-}
-
 echo "Tobii Linux setup diagnostics"
 echo "project=$root_dir"
 echo
@@ -146,21 +133,11 @@ if [[ -n "$sc_bin64" && -d "$sc_bin64" ]]; then
   fi
 
   launch_script="${STAR_CITIZEN_LAUNCH_SCRIPT:-$prefix/sc-launch.sh}"
-  state="$(hook_state "$launch_script")"
-  case "$state" in
-    installed)
-      ok "launch hook" "installed in $launch_script"
-      ;;
-    missing-wineserver-k)
-      warn "launch hook" "missing; run make install-launch-hook so services survive SC's wineserver -k"
-      ;;
-    missing-launch-script)
-      warn "launch hook" "launch script not found at $launch_script"
-      ;;
-    *)
-      warn "launch hook" "missing and no wineserver -k insertion point found in $launch_script"
-      ;;
-  esac
+  if [[ -f "$launch_script" ]] && grep -q '# tobii-linux-native-tobii-hook begin' "$launch_script"; then
+    warn "legacy launch hook" "remove with make remove-launch-hook; automatic bridge recovery replaces it"
+  else
+    ok "launch integration" "automatic Wine bridge discovery/recovery; no launch hook required"
+  fi
 else
   warn "star citizen" "Bin64 not detected; set SC_BIN64=\"/path/to/StarCitizen/LIVE/Bin64\""
   info "path quoting" "quote paths with spaces; do not backslash spaces inside quotes"
@@ -176,6 +153,6 @@ echo
 echo "Next commands:"
 echo "  Open dashboard: make runtime"
 echo "  Runtime status after SC starts: make status"
-echo "  Reinstall launch hook if needed: make install-launch-hook"
+echo "  Remove a legacy launch hook: make remove-launch-hook"
 
 exit 0

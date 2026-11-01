@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-url="${MEDIAPIPE_FACE_MODEL_URL:-https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task}"
+url="${MEDIAPIPE_FACE_MODEL_URL:-https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task}"
 out="assets/mediapipe/face_landmarker.task"
 checksum_file="assets/mediapipe/face_landmarker.task.sha256"
 

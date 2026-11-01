@@ -32,7 +32,7 @@ Common failure signs:
 ### `tools/app/tobii-ttp-mux.c`
 
 - **Built artifact:** `build/tobii-ttp-mux`
-- **Started by:** `eye-pose-dashboard.py`
+- **Started by:** `tracking_engine.py`
 - **Role:** Owns the native Tobii USB/TTP session and emits gaze/image data.
 - **Inputs:** USB interface 0 from the Tobii ET5.
 - **Outputs:**
@@ -49,17 +49,21 @@ Common failure signs:
 ### `scripts/runtime/eye-pose-dashboard.py`
 
 - **Started by:** `make runtime`, `make dashboard`, app-menu launcher.
-- **Role:** Main user-facing runtime UI and data producer.
-- **Responsibilities:**
-  - Starts/reads `tobii-ttp-mux`.
-  - Runs gaze calibration.
-  - Runs screen calibration.
-  - Runs MediaPipe head pose.
-  - Applies tuning sliders and smoothing.
-  - Sends live pose/gaze packets to compatibility services.
-- **UDP outputs:**
-  - `127.0.0.1:4243` for SESP head pose.
-  - `127.0.0.1:4457` for TCP middleware live gaze.
+- **Role:** Optional UI client of the background service.
+- **Responsibilities:** Renders status, tuning controls, and calibration windows;
+  sends validated commands over the private Unix socket. It does not own capture
+  or inference and does not send game packets.
+- **Lifetime:** Closing the window leaves the service and active tracking running.
+
+### `scripts/runtime/tracking-service.py` and `tracking_engine.py`
+
+- **Started by:** The user-session service through the runtime supervisor.
+- **Role:** Own native USB capture, inference, pose solving, calibration, settings,
+  filtering, and game-facing output. `tracking_core.py` holds shared helpers.
+- **Input demand:** SESP head-pose start/stop and TCP stream subscriptions through
+  `capture_control.py`; hardware remains idle when no client requests it.
+- **Control API:** User-private Unix socket; see [service architecture](tracking-service.md).
+- **UDP outputs:** `127.0.0.1:4243` for SESP head pose and `127.0.0.1:4457` for gaze.
 
 Runtime UDP packet format is `double[12]`:
 
@@ -86,9 +90,9 @@ Common failure signs:
 
 ### `scripts/runtime/mediapipe-face-worker.py`
 
-- **Started by:** `eye-pose-dashboard.py`
-- **Role:** Runs MediaPipe Face Landmarker outside the main dashboard process.
-- **Input:** Preprocessed in-band IR frames from the dashboard.
+- **Started by:** `tracking_engine.py`
+- **Role:** Runs MediaPipe Face Landmarker as a service-owned worker.
+- **Input:** Preprocessed in-band IR frames from the tracking engine.
 - **Output:** Face landmarks, pose estimate, confidence, latency.
 - **Environment:** `.venv/mediapipe` Python 3.11/3.12 virtual environment.
 - **Model:** `assets/mediapipe/face_landmarker.task`
@@ -114,7 +118,7 @@ Common failure signs:
 - **Important ports:**
   - TCP `4455` for Tobii middleware protocol.
   - UDP `4457` for live gaze input to middleware.
-  - UDP `4243` for live pose input to SESP.
+  - UDP `4243` for live pose input to the per-prefix bridge relay.
 
 Common failure signs:
 
@@ -148,9 +152,10 @@ Common failure signs:
 ### `tools/app/tobii-middleware-pipe-spy.c`
 
 - **Built artifact:** `.tmp/sc-tobii-stock-recon/tobii-middleware-pipe-spy.exe`
-- **Started by:** `run-sc-tobii-native-runtime.sh` under Wine.
+- **Started by:** `wine_bridges.py` under each Wine prefix.
 - **Role:** Emulates the Wine named-pipe SESP provider used for head pose.
-- **Receives live pose on:** UDP `127.0.0.1:4243`
+- **Receives live pose on:** A dedicated loopback UDP port assigned by the bridge
+  manager, which relays engine packets from `127.0.0.1:4243`.
 - **Talks to:** `tobii_gameintegration_x64.dll`
 - **Handles:**
   - SESP initialize
@@ -215,22 +220,41 @@ Common failure signs:
 - `make status` reports `SC headtracking source` missing or not `Tobii`.
 - Head/gaze works in dashboard but not in game.
 
-### Star Citizen Launch Hook
+### Desktop Tray
 
-- **Installed by:** `install.sh` or `make install-launch-hook`
-- **Script:** `scripts/app/install-sc-tobii-native-launch-hook.sh`
-- **Typical target:** `<Star Citizen prefix>/sc-launch.sh`
-- **Role:** Restarts Wine-visible Tobii services after launcher scripts run
-  `wineserver -k`.
+- **Script:** `scripts/runtime/tracking-tray.py` (system Python PySide6 QtWidgets).
+- **Role:** Optional status icon and service controls; no hardware or inference ownership.
+- **Menu:** Open dashboard, Start/Stop service, Start at boot, Quit tray.
+- **Startup:** The checkmark controls service and tray startup at desktop login.
+  Disabled preferences survive installer updates. Quitting the icon leaves the
+  dashboard and service running. A per-runtime lock prevents duplicate icons.
+- **Launch:** `make tray` or the **Tobii Tracking** application-menu entry.
 
-Common failure signs:
+### Wine Bridge Manager
 
-- `make diag` says hook installed, but `make status` reports
-  `SC launch hook execution: lines=0`.
-- Star Citizen is being launched through a different script than the one patched.
-- `make status` shows TCP discovery but zero SESP pipe attaches.
+- **Script:** `scripts/runtime/wine_bridges.py`
+- **Role:** Prepares the configured prefix, discovers active host Wine/Proton
+  prefixes/runners, and independently recovers SESP/discovery providers.
+- **Activation:** Preparing pipes never activates capture; client subscriptions do.
+- **Pose delivery:** Relays engine UDP packets to a separate receiver per prefix.
+- **Diagnostics:** `wine-bridges.json`, `wine-bridges.stdout`, and per-prefix logs.
+- **Legacy migration:** `make remove-launch-hook` removes only the marked legacy
+  block with a backup. No hook installation or launcher modification is required
+  for normal operation. See [bridge lifecycle](wine-bridges.md).
 
 ## Setup And Diagnostics
+
+### Managed bootstrap
+
+- **Entry point:** `bootstrap.sh`, downloadable and pipe-safe for one-line setup.
+- **Coordinator:** `scripts/app/install-managed.py`, using Python standard library.
+- **Dependencies:** `scripts/app/install-platform.sh` contains apt/dnf/pacman adapters.
+- **Layout:** Managed versions, shared runtime state, private integration backups,
+  `current`/`previous` links, and a `tobii` command for updates and rollback.
+- **Desktop runtime:** `.venv/ui/` supplies pinned PySide6/Tk independently of
+  distro Python bindings. Source checkouts remain supported.
+- **Recovery:** Prepare before stopping capture; restore prior integration and
+  known settings on activation failure. See [installation guide](../../INSTALL.md).
 
 ### `install.sh`
 
@@ -243,7 +267,7 @@ Common failure signs:
   - Builds helper binaries.
   - Detects Star Citizen paths.
   - Checks stock DLL.
-  - Installs launch hook when possible.
+  - Removes legacy managed launch hooks with a backup.
   - Runs `make diag` at the end.
 
 ### `uninstall.sh`
@@ -277,7 +301,7 @@ Use this when installation or first launch fails.
   - pipe logs
   - discovery logs
   - Star Citizen profile/log files
-  - launch-hook log
+  - Wine bridge status and recovery logs
 - **Reports:**
   - TCP discovery and subscriptions.
   - SESP pipe attach and provider state.
@@ -312,7 +336,8 @@ Important files:
 - `sc-window.json` - dashboard window position/size.
 - `middleware-spy.log` - TCP middleware log.
 - `middleware-pipe-spy.log` - SESP pipe log.
-- `launch-hook.log` - proof that the SC launch hook executed.
+- `wine-bridges.json` - current Wine prefixes, runner paths, provider PIDs and readiness.
+- `wine-bridges.stdout` - bridge starts, exits and retries.
 
 ### Build Artifacts
 
@@ -325,9 +350,9 @@ Important files:
 ```text
 Tobii ET5
   -> tobii-ttp-mux
-  -> dashboard
+  -> tracking service (optional dashboard client)
       -> MediaPipe worker
-      -> UDP pose 127.0.0.1:4243
+      -> UDP pose 127.0.0.1:4243 -> per-prefix bridge relay
       -> UDP gaze 127.0.0.1:4457
   -> Wine-visible compatibility services
       -> TCP middleware 127.0.0.1:4455
